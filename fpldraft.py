@@ -19,7 +19,7 @@ PRIZE_MAP = {
 
 # Standard FPL Gameweek to Calendar Month mapping (adjustable)
 GW_MONTH_MAPPING = {
-    "August": list(range(1, 2)),
+    "August": list(range(1, 3)),
     "September": list(range(3, 7)),
     "October": list(range(7, 10)),
     "November": list(range(10, 14)),
