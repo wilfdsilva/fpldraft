@@ -263,8 +263,8 @@ if league_id:
                 "2nd (GW)": counts[2],
                 "3rd (GW)": counts[3],
                 "4th (GW)": counts[4],
-                "Weekly Cash (₹)": weekly_amount,
                 "MOTM Wins": motm_wins_count[manager],
+                "Weekly Cash (₹)": weekly_amount,
                 "MOTM Cash (₹)": int(motm_amount) if motm_amount.is_integer() else motm_amount,
                 "Season End Cash (₹)": season_amount,
                 "Total Cash (₹)": int(total_cash) if float(total_cash).is_integer() else total_cash
