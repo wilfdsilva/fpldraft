@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import numpy as np
 import streamlit.components.v1 as components
+import concurrent.futures
 
 # --- Page Configuration ---
 st.set_page_config(page_title="FPL Draft Rewards & Probability Dashboard", page_icon="⚽", layout="wide")
@@ -11,33 +12,22 @@ LEAGUE_DETAILS_URL = "https://draft.premierleague.com/api/league/{}/details"
 ENTRY_HISTORY_URL = "https://draft.premierleague.com/api/entry/{}/history"
 
 # Prize distribution structure
-WEEKLY_PRIZE_MAP = {
-    1: 200,
-    2: 150,
-    3: 100,
-    4: 50
-}
-
+WEEKLY_PRIZE_MAP = {1: 200, 2: 150, 3: 100, 4: 50}
 MOTM_PRIZE = 200
 SEASON_1ST_PRIZE = 1000
 SEASON_2ND_PRIZE = 500
 
 GW_MONTH_MAPPING = {
-    "August": list(range(1, 3)),
-    "September": list(range(3, 6)),
-    "October": list(range(6, 10)),
-    "November": list(range(10, 13)),
-    "December": list(range(13, 19)),
-    "January": list(range(19, 24)),
-    "February": list(range(24, 28)),
-    "March": list(range(28, 31)),
-    "April": list(range(31, 34)),
-    "May": list(range(34, 39))
+    "August": list(range(1, 3)), "September": list(range(3, 6)),
+    "October": list(range(6, 10)), "November": list(range(10, 13)),
+    "December": list(range(13, 19)), "January": list(range(19, 24)),
+    "February": list(range(24, 28)), "March": list(range(28, 31)),
+    "April": list(range(31, 34)), "May": list(range(34, 39))
 }
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=3600) # Increased TTL to 1 hour for better perceived performance
 def load_league_data(league_id: str):
-    """Fetches league managers and full Gameweek history."""
+    """Fetches league managers and full Gameweek history concurrently."""
     try:
         res = requests.get(LEAGUE_DETAILS_URL.format(league_id))
         if res.status_code != 200:
@@ -48,12 +38,13 @@ def load_league_data(league_id: str):
         if not entries:
             return None, "No teams found in this league."
 
-        records = []
-        for entry in entries:
+        # Threaded function to fetch history concurrently
+        def fetch_manager_history(entry):
             entry_id = entry["entry_id"]
             manager_name = entry["player_first_name"]
             team_name = entry["entry_name"]
             
+            records = []
             hist_res = requests.get(ENTRY_HISTORY_URL.format(entry_id))
             if hist_res.status_code == 200:
                 history = hist_res.json().get("history", [])
@@ -65,18 +56,24 @@ def load_league_data(league_id: str):
                         "GW": gw["event"],
                         "Points": gw["points"]
                     })
+            return records
 
-        df = pd.DataFrame(records)
+        all_records = []
+        # Use ThreadPoolExecutor to fire all requests simultaneously
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            results = executor.map(fetch_manager_history, entries)
+            for result in results:
+                all_records.extend(result)
+
+        df = pd.DataFrame(all_records)
         return df, None
     except Exception as e:
         return None, str(e)
 
 
 def run_monte_carlo_season_projections(raw_df, managers, max_played_gw, num_simulations=5000):
-    """Simulates the remaining gameweeks to calculate 1st and 2nd place season finish probabilities."""
     stats = {}
     current_totals = {}
-    
     for mgr in managers:
         mgr_pts = raw_df[raw_df["Teams"] == mgr]["Points"].values
         current_totals[mgr] = float(mgr_pts.sum()) if len(mgr_pts) > 0 else 0.0
@@ -122,7 +119,6 @@ def run_monte_carlo_season_projections(raw_df, managers, max_played_gw, num_simu
 
 
 def run_monte_carlo_motm_projections(raw_df, managers, month_gws, max_played_gw, num_simulations=5000):
-    """Simulates remaining gameweeks in a specific month to calculate MOTM win probability."""
     completed_in_month = [gw for gw in month_gws if gw <= max_played_gw]
     remaining_in_month = [gw for gw in month_gws if gw > max_played_gw]
     
@@ -169,7 +165,6 @@ def run_monte_carlo_motm_projections(raw_df, managers, month_gws, max_played_gw,
 
 # --- UI Setup ---
 st.title("⚽ FPL Draft Rewards & Probability Dashboard")
-
 league_id = st.sidebar.text_input("FPL Draft League ID", value="23942")
 
 if league_id:
@@ -180,9 +175,7 @@ if league_id:
         st.error(error)
     elif raw_df is not None and not raw_df.empty:
         
-        # ==========================================
         # VALIDATION: ONLY CONSIDER GWs WITH POINTS > 0
-        # ==========================================
         gw_sums = raw_df.groupby("GW")["Points"].sum()
         valid_gws = gw_sums[gw_sums > 0].index.tolist()
         raw_df = raw_df[raw_df["GW"].isin(valid_gws)]
@@ -192,9 +185,7 @@ if league_id:
         all_managers = sorted(raw_df["Teams"].unique()) if not raw_df.empty else []
         played_gw_cols = [f"GW{i}" for i in range(1, max_played_gw + 1)]
 
-        # ==========================================
         # 1. POINTS MATRIX
-        # ==========================================
         if not raw_df.empty:
             points_pivot = raw_df.pivot(index="Teams", columns="GW", values="Points").reindex(columns=range(1, 39))
         else:
@@ -208,9 +199,7 @@ if league_id:
             points_pivot["Total"] = 0
             points_pivot["Average"] = 0.0
 
-        # ==========================================
         # 2. WEEKLY PODIUM WINNERS
-        # ==========================================
         winners_dict = {1: {}, 2: {}, 3: {}, 4: {}}
         for gw in range(1, 39):
             col_name = f"GW{gw}"
@@ -225,12 +214,9 @@ if league_id:
         winners_df = pd.DataFrame(winners_dict).T
         winners_df.index.name = "Winners"
 
-        # ==========================================
-        # 3. MANAGER OF THE MONTH CASH CALCULATION
-        # ==========================================
+        # 3. MOTM CASH CALCULATION
         motm_wins_count = {m: 0 for m in all_managers}
         motm_cash_won = {m: 0.0 for m in all_managers}
-        completed_months_log = {}
 
         for month, gws in GW_MONTH_MAPPING.items():
             if all(gw <= max_played_gw for gw in gws):  
@@ -243,11 +229,8 @@ if league_id:
                     for w in month_winners:
                         motm_wins_count[w] += 1
                         motm_cash_won[w] += prize_per_mgr
-                    completed_months_log[month] = (month_winners, top_pts)
 
-        # ==========================================
-        # 4. FINAL STANDINGS CASH (AFTER GW 38)
-        # ==========================================
+        # 4. FINAL STANDINGS CASH
         season_cash_won = {m: 0 for m in all_managers}
         if max_played_gw == 38:
             final_ranks = points_pivot["Total"].sort_values(ascending=False).index.tolist()
@@ -256,9 +239,7 @@ if league_id:
             if len(final_ranks) >= 2:
                 season_cash_won[final_ranks[1]] += SEASON_2ND_PRIZE
 
-        # ==========================================
-        # 5. CASH SUMMARY & MATRIX
-        # ==========================================
+        # 5. SUMMARY & MATRIX
         summary_data = []
         cash_matrix = pd.DataFrame(0, index=all_managers, columns=all_gw_cols)
 
@@ -291,10 +272,7 @@ if league_id:
 
         if summary_data:
             summary_df = pd.DataFrame(summary_data).set_index("Teams")
-            if played_gw_cols:
-                cash_matrix["Total Weekly Cash"] = cash_matrix[played_gw_cols].sum(axis=1)
-            else:
-                cash_matrix["Total Weekly Cash"] = 0
+            cash_matrix["Total Weekly Cash"] = cash_matrix[played_gw_cols].sum(axis=1) if played_gw_cols else 0
         else:
             summary_df = pd.DataFrame()
 
@@ -302,51 +280,37 @@ if league_id:
         # DASHBOARD TABS
         # ==========================================
         tab_overview, tab_cash, tab_motm, tab_prob, tab_live = st.tabs([
-            "📊 Points & Standings",
-            "💰 Podium Counts & Cash Won",
-            "👑 Manager of the Month",
-            "🎲 Win Probabilities (%)",
-            "🔴 Live GW Points"
+            "📊 Points & Standings", "💰 Podium Counts & Cash Won", "👑 Manager of the Month", "🎲 Win Probabilities (%)", "🔴 Live GW Points"
         ])
 
-        # --- TAB 1: Points & Weekly Winners ---
         with tab_overview:
             st.subheader("📋 Points Matrix (GW1 - GW38)")
-            st.dataframe(points_pivot.fillna(""), use_container_width=True)
+            with st.expander("Expand to view full 38-Gameweek matrix", expanded=False):
+                st.dataframe(points_pivot.fillna(""), use_container_width=True)
 
             st.subheader("🏆 Weekly Podium Winners (1st - 4th)")
-            st.dataframe(winners_df.fillna(""), use_container_width=True)
+            with st.expander("Expand to view full winners breakdown", expanded=False):
+                st.dataframe(winners_df.fillna(""), use_container_width=True)
 
-        # --- TAB 2: Cash Won & Breakdown ---
         with tab_cash:
             col_left, col_right = st.columns([2, 1])
-
             with col_left:
                 st.subheader("🎖️ Podium Counts & Total Cash Won")
                 if not summary_df.empty:
                     st.dataframe(summary_df.sort_values(by="Total Cash (₹)", ascending=False), use_container_width=True)
-                else:
-                    st.info("No data yet.")
-
             with col_right:
                 st.subheader("💵 Prize Rules")
                 prize_rule_df = pd.DataFrame({
-                    "Award Category": [
-                        "Weekly 1st Place", "Weekly 2nd Place", "Weekly 3rd Place", "Weekly 4th Place",
-                        "Manager of the Month (All GWs complete)", "End of Season (1st Overall Points)", "End of Season (2nd Overall Points)"
-                    ],
-                    "Cash Amount": [
-                        f"₹{WEEKLY_PRIZE_MAP[1]}", f"₹{WEEKLY_PRIZE_MAP[2]}", f"₹{WEEKLY_PRIZE_MAP[3]}", f"₹{WEEKLY_PRIZE_MAP[4]}",
-                        f"₹{MOTM_PRIZE}", f"₹{SEASON_1ST_PRIZE}", f"₹{SEASON_2ND_PRIZE}"
-                    ]
+                    "Award Category": ["Weekly 1st", "Weekly 2nd", "Weekly 3rd", "Weekly 4th", "MOTM (Complete)", "1st Overall", "2nd Overall"],
+                    "Cash": [f"₹{WEEKLY_PRIZE_MAP[1]}", f"₹{WEEKLY_PRIZE_MAP[2]}", f"₹{WEEKLY_PRIZE_MAP[3]}", f"₹{WEEKLY_PRIZE_MAP[4]}", f"₹{MOTM_PRIZE}", f"₹{SEASON_1ST_PRIZE}", f"₹{SEASON_2ND_PRIZE}"]
                 })
                 st.dataframe(prize_rule_df, use_container_width=True, hide_index=True)
 
             st.markdown("---")
             st.subheader("💳 Weekly Cash Won per Gameweek (₹)")
-            st.dataframe(cash_matrix, use_container_width=True)
+            with st.expander("Expand to view granular weekly payouts", expanded=False):
+                st.dataframe(cash_matrix, use_container_width=True)
 
-        # --- TAB 3: Manager of the Month ---
         with tab_motm:
             st.subheader("👑 Manager of the Month Standings")
             selected_month = st.selectbox("Select Calendar Month", list(GW_MONTH_MAPPING.keys()))
@@ -358,72 +322,53 @@ if league_id:
 
             motm_filtered = raw_df[raw_df["GW"].isin(target_gws)]
             if not motm_filtered.empty:
-                motm_summary = (
-                    motm_filtered.groupby("Teams")["Points"]
-                    .sum()
-                    .reset_index()
-                    .sort_values(by="Points", ascending=False)
-                    .reset_index(drop=True)
-                )
+                motm_summary = motm_filtered.groupby("Teams")["Points"].sum().reset_index().sort_values(by="Points", ascending=False).reset_index(drop=True)
                 motm_summary.index += 1
-
                 top_score = motm_summary.iloc[0]["Points"]
                 current_leaders = motm_summary[motm_summary["Points"] == top_score]["Teams"].tolist()
 
                 if is_month_complete:
                     st.success(f"🎉 **Official MOTM Winner(s):** {', '.join(current_leaders)} with **{top_score}** pts (Won ₹{MOTM_PRIZE/len(current_leaders):.0f} each)!")
                 else:
-                    st.info(f"Leader so far: **{', '.join(current_leaders)}** ({top_score} pts). Cash will be awarded after all GWs in {selected_month} finish.")
-
+                    st.info(f"Leader so far: **{', '.join(current_leaders)}** ({top_score} pts). Cash will be awarded after all GWs finish.")
                 st.dataframe(motm_summary, use_container_width=True)
             else:
                 st.info(f"No Gameweek points finalized yet for {selected_month} (GWs: {target_gws}).")
 
-        # --- TAB 4: Win Probabilities ---
         with tab_prob:
             st.header("🎲 Monte Carlo Win Probability Projections")
-            st.caption("Projections are calculated from 5,000 simulations using each manager's historical scoring rate and variance.")
-
+            st.caption("Projections based on 5,000 simulations using each manager's historical scoring rate and variance.")
             if all_managers:
                 col_seas, col_month = st.columns(2)
-
                 with col_seas:
                     st.subheader("🏆 End-of-Season Probability (GW38)")
                     season_probs = run_monte_carlo_season_projections(raw_df, all_managers, max_played_gw)
-
-                    season_prob_df = pd.DataFrame([
-                        {
-                            "Teams": m,
-                            "Current Total Pts": int(points_pivot.loc[m, "Total"]) if "Total" in points_pivot.columns else 0,
-                            "1st Place Prob (₹1000)": f"{season_probs.get(m, (0,0))[0]}%",
-                            "2nd Place Prob (₹500)": f"{season_probs.get(m, (0,0))[1]}%"
-                        }
-                        for m in all_managers
-                    ]).sort_values(by="Current Total Pts", ascending=False).reset_index(drop=True)
-
+                    season_prob_df = pd.DataFrame([{"Teams": m, "Current Pts": int(points_pivot.loc[m, "Total"]) if "Total" in points_pivot.columns else 0, "1st Place (%)": f"{season_probs.get(m, (0,0))[0]}%", "2nd Place (%)": f"{season_probs.get(m, (0,0))[1]}%"} for m in all_managers]).sort_values(by="Current Pts", ascending=False).reset_index(drop=True)
                     st.dataframe(season_prob_df, use_container_width=True, hide_index=True)
-
                 with col_month:
                     st.subheader(f"👑 MOTM Probability: {selected_month}")
                     motm_probs = run_monte_carlo_motm_projections(raw_df, all_managers, target_gws, max_played_gw)
-
-                    motm_prob_df = pd.DataFrame([
-                        {
-                            "Teams": m,
-                            "Win MOTM Prob (%)": f"{motm_probs.get(m, 0)}%"
-                        }
-                        for m in all_managers
-                    ]).sort_values(by="Win MOTM Prob (%)", ascending=False).reset_index(drop=True)
-
+                    motm_prob_df = pd.DataFrame([{"Teams": m, "Win MOTM Prob (%)": f"{motm_probs.get(m, 0)}%"} for m in all_managers]).sort_values(by="Win MOTM Prob (%)", ascending=False).reset_index(drop=True)
                     st.dataframe(motm_prob_df, use_container_width=True, hide_index=True)
                     
-        # --- TAB 5: Live GW Points ---
         with tab_live:
             st.subheader("🔴 Live Gameweek Points Tracker")
-            st.markdown("Monitor live FPL points as the matches happen. *(If the embed fails to load, [click here to open the tracker in a new tab](https://www.anewpla.net/fpl/live/))*")
+            st.markdown("Monitor live points. *(If the embed fails, [click here to open the tracker](https://www.anewpla.net/fpl/live/))*")
             
-            # Embed the website
-            components.iframe("https://www.anewpla.net/fpl/live/", height=800, scrolling=True)
-
+            # Using custom HTML injected iframe for the loading="lazy" attribute optimization
+            components.html(
+                """
+                <iframe 
+                    src="https://www.anewpla.net/fpl/live/" 
+                    width="100%" 
+                    height="800px" 
+                    style="border:none;" 
+                    loading="lazy" 
+                    title="Live FPL Gameweek Points Tracker">
+                </iframe>
+                """,
+                height=800,
+                scrolling=True
+            )
 else:
     st.info("👈 Please enter your Draft League ID in the sidebar to load the dashboard.")
