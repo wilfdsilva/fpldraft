@@ -380,8 +380,7 @@ elif raw_df is not None and not raw_df.empty:
 
         st.markdown("---")
         st.subheader("💳 Weekly Cash Won per Gameweek (₹)")
-        with st.expander("Expand to view granular weekly payouts", expanded=False):
-            st.dataframe(cash_matrix, use_container_width=True)
+        st.dataframe(cash_matrix, use_container_width=True)
 
     with tab_motm:
         st.subheader("👑 Manager of the Month Standings")
