@@ -1,14 +1,20 @@
-import streamlit as st
+import os
 import sqlite3
+import requests
 import pandas as pd
 import numpy as np
+import streamlit as st
 import streamlit.components.v1 as components
-import os
+import concurrent.futures
+from datetime import datetime, timedelta
 
 # --- Page Configuration ---
-st.set_page_config(page_title="FPL Draft Rewards & Probability Dashboard", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="FPL Draft Rewards Dashboard", page_icon="⚽", layout="wide")
 
+LEAGUE_ID = "23942"
 DB_NAME = "fpl_draft.db"
+LEAGUE_DETAILS_URL = "https://draft.premierleague.com/api/league/{}/details"
+ENTRY_HISTORY_URL = "https://draft.premierleague.com/api/entry/{}/history"
 
 # Prize distribution structure
 WEEKLY_PRIZE_MAP = {1: 200, 2: 150, 3: 100, 4: 50}
@@ -24,24 +30,102 @@ GW_MONTH_MAPPING = {
     "April": list(range(31, 34)), "May": list(range(34, 39))
 }
 
-@st.cache_data(ttl=60)
-def load_data_from_db():
-    """Reads league data from local SQLite database."""
-    if not os.path.exists(DB_NAME):
-        return None, None, "Database file not found. Please run 'fetch_data.py' first."
-    
+# ==========================================
+# BACKGROUND SYNC & DATABASE FUNCTIONS
+# ==========================================
+def sync_fpl_draft_db(league_id=LEAGUE_ID):
+    """Fetches FPL API data concurrently and updates the local SQLite database."""
+    res = requests.get(LEAGUE_DETAILS_URL.format(league_id))
+    if res.status_code != 200:
+        return False, f"Failed to retrieve league details (Status code: {res.status_code})"
+
+    league_data = res.json()
+    entries = league_data.get("league_entries", [])
+    if not entries:
+        return False, "No teams found in this league."
+
+    def fetch_entry(entry):
+        entry_id = entry["entry_id"]
+        manager_name = entry["player_first_name"]
+        team_name = entry["entry_name"]
+        
+        records = []
+        hist_res = requests.get(ENTRY_HISTORY_URL.format(entry_id))
+        if hist_res.status_code == 200:
+            history = hist_res.json().get("history", [])
+            for gw in history:
+                records.append({
+                    "entry_id": entry_id,
+                    "Teams": manager_name,
+                    "Team Name": team_name,
+                    "GW": gw["event"],
+                    "Points": gw["points"]
+                })
+        return records
+
+    all_records = []
+    # Utilize concurrent fetching for faster API performance
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        for result in executor.map(fetch_entry, entries):
+            all_records.extend(result)
+
+    if not all_records:
+        return False, "No history records retrieved."
+
+    df = pd.DataFrame(all_records)
+
+    # Save to SQLite database
     conn = sqlite3.connect(DB_NAME)
+    df.to_sql("gw_points", conn, if_exists="replace", index=False)
+    
+    # Store last synced timestamp
+    meta_df = pd.DataFrame([{"last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}])
+    meta_df.to_sql("metadata", conn, if_exists="replace", index=False)
+    conn.close()
+    
+    # Invalidate Streamlit's cache to force it to read the new DB data
+    load_data_from_db.clear()
+    
+    return True, "Database successfully updated."
+
+def check_and_auto_sync():
+    """Checks if the DB is missing or older than 1 hour. If so, triggers an automatic sync."""
+    if not os.path.exists(DB_NAME):
+        sync_fpl_draft_db()
+        return
+        
     try:
+        conn = sqlite3.connect(DB_NAME)
+        meta_df = pd.read_sql("SELECT * FROM metadata", conn)
+        conn.close()
+        last_updated_str = meta_df.iloc[0]["last_updated"]
+        last_updated = datetime.strptime(last_updated_str, "%Y-%m-%d %H:%M:%S")
+        
+        # If DB is older than 60 minutes, fetch fresh data automatically
+        if datetime.now() - last_updated > timedelta(minutes=60):
+            sync_fpl_draft_db()
+    except Exception:
+        sync_fpl_draft_db()
+
+@st.cache_data(ttl=3600)
+def load_data_from_db():
+    """Reads league data quickly from the local SQLite database."""
+    if not os.path.exists(DB_NAME):
+        return None, None, "Database file not found."
+    
+    try:
+        conn = sqlite3.connect(DB_NAME)
         df = pd.read_sql("SELECT * FROM gw_points", conn)
         meta_df = pd.read_sql("SELECT * FROM metadata", conn)
-        last_updated = meta_df.iloc[0]["last_updated"] if not meta_df.empty else "Unknown"
+        last_updated_str = meta_df.iloc[0]["last_updated"] if not meta_df.empty else "Unknown"
         conn.close()
-        return df, last_updated, None
+        return df, last_updated_str, None
     except Exception as e:
-        conn.close()
         return None, None, str(e)
 
-
+# ==========================================
+# MONTE CARLO PROJECTION FUNCTIONS
+# ==========================================
 def run_monte_carlo_season_projections(raw_df, managers, max_played_gw, num_simulations=5000):
     stats = {}
     current_totals = {}
@@ -72,8 +156,8 @@ def run_monte_carlo_season_projections(raw_df, managers, max_played_gw, num_simu
         sim_scores = {}
         for m in managers:
             mean, std = stats[m]
-            simulated_remaining_pts = np.sum(np.random.normal(mean, std, remaining_gws))
-            sim_scores[m] = current_totals[m] + max(0, simulated_remaining_pts)
+            sim_pts = np.sum(np.random.normal(mean, std, remaining_gws))
+            sim_scores[m] = current_totals[m] + max(0, sim_pts)
 
         ranked = sorted(sim_scores.items(), key=lambda x: x[1], reverse=True)
         first_counts[ranked[0][0]] += 1
@@ -81,10 +165,7 @@ def run_monte_carlo_season_projections(raw_df, managers, max_played_gw, num_simu
             second_counts[ranked[1][0]] += 1
 
     return {
-        m: (
-            round((first_counts[m] / num_simulations) * 100, 1),
-            round((second_counts[m] / num_simulations) * 100, 1)
-        )
+        m: (round((first_counts[m] / num_simulations) * 100, 1), round((second_counts[m] / num_simulations) * 100, 1))
         for m in managers
     }
 
@@ -92,7 +173,6 @@ def run_monte_carlo_season_projections(raw_df, managers, max_played_gw, num_simu
 def run_monte_carlo_motm_projections(raw_df, managers, month_gws, max_played_gw, num_simulations=5000):
     completed_in_month = [gw for gw in month_gws if gw <= max_played_gw]
     remaining_in_month = [gw for gw in month_gws if gw > max_played_gw]
-    
     current_month_pts = {}
     stats = {}
 
@@ -134,22 +214,40 @@ def run_monte_carlo_motm_projections(raw_df, managers, month_gws, max_played_gw,
     return {m: round((win_counts[m] / num_simulations) * 100, 1) for m in managers}
 
 
-# --- UI Setup ---
+# ==========================================
+# UI SETUP & DASHBOARD RENDERING
+# ==========================================
 st.title("⚽ FPL Draft Rewards & Probability Dashboard")
 
+# 1. Run the automatic background DB sync check on load
+with st.spinner("Ensuring database is up to date..."):
+    check_and_auto_sync()
+
+# 2. Load the data instantly from SQLite
 raw_df, last_updated, error = load_data_from_db()
 
+# Sidebar Setup
 st.sidebar.markdown(f"**Database Status:**")
 if last_updated:
-    st.sidebar.success(f"Last updated: {last_updated}")
+    st.sidebar.success(f"Last fetched: {last_updated}")
 else:
     st.sidebar.warning("No database found.")
+
+if st.sidebar.button("🔄 Force Sync Latest Points"):
+    with st.spinner("Querying API..."):
+        success, msg = sync_fpl_draft_db()
+        if success:
+            st.rerun()
+        else:
+            st.sidebar.error(msg)
 
 if error:
     st.error(error)
 elif raw_df is not None and not raw_df.empty:
     
-    # VALIDATION: ONLY CONSIDER GWs WITH POINTS > 0
+    # ==========================================
+    # VALIDATION: CONSIDER ONLY GWs WITH POINTS > 0
+    # ==========================================
     gw_sums = raw_df.groupby("GW")["Points"].sum()
     valid_gws = gw_sums[gw_sums > 0].index.tolist()
     raw_df = raw_df[raw_df["GW"].isin(valid_gws)]
@@ -259,9 +357,11 @@ elif raw_df is not None and not raw_df.empty:
 
     with tab_overview:
         st.subheader("📋 Points Matrix (GW1 - GW38)")
+        # Expanders removed as requested
         st.dataframe(points_pivot.fillna(""), use_container_width=True)
 
         st.subheader("🏆 Weekly Podium Winners (1st - 4th)")
+        # Expanders removed as requested
         st.dataframe(winners_df.fillna(""), use_container_width=True)
 
     with tab_cash:
@@ -280,7 +380,8 @@ elif raw_df is not None and not raw_df.empty:
 
         st.markdown("---")
         st.subheader("💳 Weekly Cash Won per Gameweek (₹)")
-        st.dataframe(cash_matrix, use_container_width=True)
+        with st.expander("Expand to view granular weekly payouts", expanded=False):
+            st.dataframe(cash_matrix, use_container_width=True)
 
     with tab_motm:
         st.subheader("👑 Manager of the Month Standings")
@@ -326,6 +427,7 @@ elif raw_df is not None and not raw_df.empty:
         st.subheader("🔴 Live Gameweek Points Tracker")
         st.markdown("Monitor live points. *(If the embed fails, [click here to open the tracker](https://www.anewpla.net/fpl/live/))*")
         
+        # Kept the lazy-loading iframe logic intact for optimal frontend performance 
         components.html(
             """
             <iframe 
