@@ -174,7 +174,6 @@ league_id = st.sidebar.text_input("FPL Draft League ID", value="23942")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Data Sync**")
-# Clears the in-memory cache to force a fresh pull from the FPL API
 if st.sidebar.button("🔄 Force Sync Latest Points"):
     st.cache_data.clear()
     st.rerun()
@@ -255,12 +254,14 @@ if league_id:
 
         # 5. SUMMARY & MATRIX
         summary_data = []
-        cash_matrix = pd.DataFrame(0, index=all_managers, columns=all_gw_cols)
+        # Initialize with NaN so unplayed gameweeks remain blank
+        cash_matrix = pd.DataFrame(np.nan, index=all_managers, columns=all_gw_cols)
 
         for manager in all_managers:
             counts = {1: 0, 2: 0, 3: 0, 4: 0}
             for gw in range(1, max_played_gw + 1):
                 col_name = f"GW{gw}"
+                cash_matrix.loc[manager, col_name] = 0 # Default played Gameweek to 0
                 for pos in [1, 2, 3, 4]:
                     if winners_dict[pos].get(col_name) == manager:
                         counts[pos] += 1
@@ -286,6 +287,7 @@ if league_id:
 
         if summary_data:
             summary_df = pd.DataFrame(summary_data).set_index("Teams")
+            # Calculate total summing only over the gameweeks played so far
             cash_matrix["Total Weekly Cash"] = cash_matrix[played_gw_cols].sum(axis=1) if played_gw_cols else 0
         else:
             summary_df = pd.DataFrame()
@@ -320,7 +322,8 @@ if league_id:
 
             st.markdown("---")
             st.subheader("💳 Weekly Cash Won per Gameweek (₹)")
-            st.dataframe(cash_matrix, use_container_width=True)
+            # Use fillna("") to visually blank out the NaN columns for unplayed GWs
+            st.dataframe(cash_matrix.fillna(""), use_container_width=True)
 
         with tab_motm:
             st.subheader("👑 Manager of the Month Standings")
@@ -333,16 +336,38 @@ if league_id:
 
             motm_filtered = raw_df[raw_df["GW"].isin(target_gws)]
             if not motm_filtered.empty:
-                motm_summary = motm_filtered.groupby("Teams")["Points"].sum().reset_index().sort_values(by="Points", ascending=False).reset_index(drop=True)
-                motm_summary.index += 1
-                top_score = motm_summary.iloc[0]["Points"]
-                current_leaders = motm_summary[motm_summary["Points"] == top_score]["Teams"].tolist()
+                # Pivot to show individual GW points columns
+                motm_pivot = motm_filtered.pivot(index="Teams", columns="GW", values="Points")
+                
+                # Make sure all GWs in the month appear as columns, even if unplayed
+                for gw in target_gws:
+                    if gw not in motm_pivot.columns:
+                        motm_pivot[gw] = np.nan
+                        
+                # Reorder to ensure chronological GW order
+                motm_pivot = motm_pivot[target_gws]
+                
+                # Add the Total Points column at the end
+                motm_pivot["Total Points"] = motm_pivot.sum(axis=1)
+                
+                # Sort and index
+                motm_pivot = motm_pivot.sort_values(by="Total Points", ascending=False).reset_index()
+                motm_pivot.index += 1
+                
+                # Rename the columns so they say 'GW1', 'GW2', instead of '1', '2'
+                rename_cols = {gw: f"GW{gw}" for gw in target_gws}
+                motm_pivot = motm_pivot.rename(columns=rename_cols)
+
+                top_score = motm_pivot.iloc[0]["Total Points"]
+                current_leaders = motm_pivot[motm_pivot["Total Points"] == top_score]["Teams"].tolist()
 
                 if is_month_complete:
                     st.success(f"🎉 **Official MOTM Winner(s):** {', '.join(current_leaders)} with **{top_score}** pts (Won ₹{MOTM_PRIZE/len(current_leaders):.0f} each)!")
                 else:
                     st.info(f"Leader so far: **{', '.join(current_leaders)}** ({top_score} pts). Cash will be awarded after all GWs finish.")
-                st.dataframe(motm_summary, use_container_width=True)
+                
+                # Display the dataframe and use fillna("") to blank out unplayed gameweeks
+                st.dataframe(motm_pivot.fillna(""), use_container_width=True)
             else:
                 st.info(f"No Gameweek points finalized yet for {selected_month} (GWs: {target_gws}).")
 
