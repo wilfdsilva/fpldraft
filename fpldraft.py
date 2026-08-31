@@ -34,23 +34,36 @@ st.markdown("""
         font-family: 'Arial Black', sans-serif;
     }
     
-    /* Tabs Customization */
+    /* === TABS CUSTOMIZATION === */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 15px;
+        gap: 8px;
+        padding-top: 10px;
     }
+    
+    /* Base style for ALL tabs (Inactive & Active) */
     .stTabs [data-baseweb="tab"] {
         background-color: var(--epl-purple) !important;
-        color: white !important;
-        font-weight: bold;
-        border-bottom: 5px solid transparent !important;
-        border-top-left-radius: 6px;
-        border-top-right-radius: 6px;
-        transition: 0.3s;
+        border-radius: 8px 8px 0px 0px !important;
+        padding: 10px 15px !important;
+        border-bottom: 5px solid var(--epl-purple) !important; /* Prevents jumping */
+        transition: all 0.3s ease-in-out !important;
     }
-    /* ACTIVE TAB: Yellow underline */
+    
+    /* Force ALL text inside tabs to be white */
+    .stTabs [data-baseweb="tab"] span, 
+    .stTabs [data-baseweb="tab"] p, 
+    .stTabs [data-baseweb="tab"] div {
+        color: #ffffff !important;
+        font-weight: 800 !important;
+    }
+    
+    /* ACTIVE TAB: Pop up and Yellow underline */
     .stTabs [aria-selected="true"] {
         border-bottom: 5px solid var(--epl-yellow) !important;
+        transform: translateY(-5px) !important; /* Highlights/Pops up the tab */
+        box-shadow: 0px 5px 10px rgba(0, 0, 0, 0.2) !important;
     }
+    /* ========================== */
     
     /* Sidebar */
     section[data-testid="stSidebar"] {
@@ -438,7 +451,7 @@ if league_id:
                 st.subheader("💵 Prize Rules")
                 prize_rule_df = pd.DataFrame({
                     "Award Category": ["Weekly 1st", "Weekly 2nd", "Weekly 3rd", "Weekly 4th", "MOTM (Complete)", "1st Overall", "2nd Overall"],
-                    "Cash": [f"₹{WEEKLY_PRIZE_MAP[1]}", f"₹{WEEKLY_PRIZE_MAP[2]}", f"₹{WEEKLY_PRIZE_MAP[3]}", f"₹{WEEKLY_PRIZE_MAP[4]}", f"₹{MOTM_PRIZE}", f"₹{SEASON_1ST_PRIZE}", f"₹{SEASON_2ND_PRIZE}"]
+                    "Cash": [f"₹{WEEKLY_PRIZE_MAP[1]}", f"₹{WEEKLY_PRIZE_MAP[2]}", f"₹{WEEKLY_PRIZE_MAP[3]}", f"WEEKLY_PRIZE_MAP[4]}", f"₹{MOTM_PRIZE}", f"₹{SEASON_1ST_PRIZE}", f"₹{SEASON_2ND_PRIZE}"]
                 })
                 st.dataframe(prize_rule_df.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
 
