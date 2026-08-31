@@ -8,6 +8,117 @@ import concurrent.futures
 # --- Page Configuration ---
 st.set_page_config(page_title="FPL Draft Rewards Dashboard", page_icon="⚽", layout="wide")
 
+# ==========================================
+# EPL THEME & CUSTOM FOOTBALL CURSOR
+# ==========================================
+# 1. Injecting standard EPL styling via CSS
+st.markdown("""
+<style>
+    /* Official EPL Theme Colors */
+    :root {
+        --epl-purple: #38003C;
+        --epl-green: #00FF85;
+        --epl-pink: #E90052;
+        --epl-cyan: #04F5FF;
+    }
+    
+    .stApp {
+        background-color: #f9f9f9;
+    }
+    
+    /* Headers & Text */
+    h1, h2, h3 {
+        color: var(--epl-purple) !important;
+        font-weight: 900 !important;
+        font-family: 'Arial Black', sans-serif;
+    }
+    
+    /* Tabs Customization */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 15px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        color: var(--epl-purple);
+        font-weight: bold;
+        border-bottom: 4px solid transparent;
+        transition: 0.3s;
+    }
+    .stTabs [aria-selected="true"] {
+        color: var(--epl-pink) !important;
+        border-bottom: 4px solid var(--epl-pink) !important;
+    }
+    
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background-color: var(--epl-purple);
+        color: white;
+    }
+    
+    /* Buttons */
+    .stButton>button {
+        background-color: var(--epl-green);
+        color: var(--epl-purple);
+        border: 2px solid var(--epl-purple);
+        font-weight: 900;
+        border-radius: 8px;
+        transition: all 0.3s ease;
+    }
+    .stButton>button:hover {
+        background-color: var(--epl-pink);
+        color: white;
+        border-color: white;
+        transform: scale(1.05);
+    }
+
+    /* Fallback static cursor just in case JS iframe is blocked by cloud */
+    * {
+        cursor: url('https://cdn-icons-png.flaticon.com/24/53/53283.png') 12 12, auto !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# 2. Injecting JavaScript to handle the spinning ball animation on click
+components.html("""
+<script>
+try {
+    const doc = window.parent.document;
+    if (!doc.getElementById('custom-football-cursor')) {
+        const cursor = doc.createElement('div');
+        cursor.id = 'custom-football-cursor';
+        cursor.innerHTML = '⚽';
+        cursor.style.position = 'fixed';
+        cursor.style.pointerEvents = 'none';
+        cursor.style.zIndex = '99999999';
+        cursor.style.fontSize = '24px';
+        cursor.style.transition = 'transform 0.2s ease-out';
+        cursor.style.transformOrigin = 'center';
+        
+        // Hide default cursor completely to rely on the rotating emoji
+        const style = doc.createElement('style');
+        style.innerHTML = `* { cursor: none !important; }`;
+        doc.head.appendChild(style);
+        
+        doc.body.appendChild(cursor);
+        
+        let rotation = 0;
+        doc.addEventListener('mousemove', e => {
+            cursor.style.left = (e.clientX - 12) + 'px';
+            cursor.style.top = (e.clientY - 12) + 'px';
+        });
+        doc.addEventListener('mousedown', () => {
+            rotation += 180; // Spins the ball on click
+            cursor.style.transform = `rotate(${rotation}deg) scale(1.3)`;
+        });
+        doc.addEventListener('mouseup', () => {
+            cursor.style.transform = `rotate(${rotation}deg) scale(1)`;
+        });
+    }
+} catch (e) {
+    console.log("Iframe sandboxing prevented custom JS cursor. Falling back to CSS cursor.");
+}
+</script>
+""", height=0, width=0)
+
 LEAGUE_DETAILS_URL = "https://draft.premierleague.com/api/league/{}/details"
 ENTRY_HISTORY_URL = "https://draft.premierleague.com/api/entry/{}/history"
 
@@ -213,7 +324,6 @@ if league_id:
             points_pivot["Average"] = 0.0
 
         # ---> REORDER COLUMNS HERE <---
-        # Shift Total and Average to the start of the dataframe
         new_col_order = ["Total", "Average"] + all_gw_cols
         points_pivot = points_pivot[new_col_order]
 
@@ -306,7 +416,15 @@ if league_id:
 
         with tab_overview:
             st.subheader("📋 Points Matrix (GW1 - GW38)")
-            st.dataframe(points_pivot.fillna(""), use_container_width=True)
+            
+            # ---> APPLY PANDAS STYLING FOR HIGHLIGHTING <---
+            formatted_pivot = points_pivot.fillna("")
+            styled_pivot = formatted_pivot.style.map(
+                lambda _: 'background-color: #38003c; color: #00ff85; font-weight: bold;', subset=['Total']
+            ).map(
+                lambda _: 'background-color: #e90052; color: #ffffff; font-weight: bold;', subset=['Average']
+            )
+            st.dataframe(styled_pivot, use_container_width=True)
 
             st.subheader("🏆 Weekly Podium Winners (1st - 4th)")
             st.dataframe(winners_df.fillna(""), use_container_width=True)
