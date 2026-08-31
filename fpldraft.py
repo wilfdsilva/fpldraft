@@ -39,18 +39,17 @@ st.markdown("""
         gap: 15px;
     }
     .stTabs [data-baseweb="tab"] {
-        color: var(--epl-purple);
+        background-color: var(--epl-purple) !important;
+        color: white !important;
         font-weight: bold;
-        border-bottom: 4px solid transparent;
-        transition: 0.3s;
-    }
-    /* ACTIVE TAB: Yellow background, Black text */
-    .stTabs [aria-selected="true"] {
-        background-color: var(--epl-yellow) !important;
-        color: #000000 !important;
-        border-bottom: 4px solid #000000 !important;
+        border-bottom: 5px solid transparent !important;
         border-top-left-radius: 6px;
         border-top-right-radius: 6px;
+        transition: 0.3s;
+    }
+    /* ACTIVE TAB: Yellow underline */
+    .stTabs [aria-selected="true"] {
+        border-bottom: 5px solid var(--epl-yellow) !important;
     }
     
     /* Sidebar */
