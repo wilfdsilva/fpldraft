@@ -451,7 +451,7 @@ if league_id:
                 st.subheader("💵 Prize Rules")
                 prize_rule_df = pd.DataFrame({
                     "Award Category": ["Weekly 1st", "Weekly 2nd", "Weekly 3rd", "Weekly 4th", "MOTM (Complete)", "1st Overall", "2nd Overall"],
-                    "Cash": [f"₹{WEEKLY_PRIZE_MAP[1]}", f"₹{WEEKLY_PRIZE_MAP[2]}", f"₹{WEEKLY_PRIZE_MAP[3]}", f"WEEKLY_PRIZE_MAP[4]}", f"₹{MOTM_PRIZE}", f"₹{SEASON_1ST_PRIZE}", f"₹{SEASON_2ND_PRIZE}"]
+                    "Cash": [f"₹{WEEKLY_PRIZE_MAP[1]}", f"₹{WEEKLY_PRIZE_MAP[2]}", f"₹{WEEKLY_PRIZE_MAP[3]}", f"₹{WEEKLY_PRIZE_MAP[4]}", f"₹{MOTM_PRIZE}", f"₹{SEASON_1ST_PRIZE}", f"₹{SEASON_2ND_PRIZE}"]
                 })
                 st.dataframe(prize_rule_df.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
 
