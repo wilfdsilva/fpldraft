@@ -45,8 +45,8 @@ st.markdown("""
         background-color: var(--epl-purple) !important;
         border-radius: 8px 8px 0px 0px !important;
         padding: 10px 15px !important;
-        border-bottom: 5px solid var(--epl-purple) !important; /* Prevents jumping */
-        transition: all 0.3s ease-in-out !important;
+        border-bottom: 5px solid var(--epl-purple) !important; 
+        transition: transform 0.3s ease-in-out, box-shadow 0.3s ease-in-out !important;
     }
     
     /* Force ALL text inside tabs to be white */
@@ -59,6 +59,7 @@ st.markdown("""
     
     /* ACTIVE TAB: Pop up and Yellow underline */
     .stTabs [aria-selected="true"] {
+        background-color: var(--epl-purple) !important;
         border-bottom: 5px solid var(--epl-yellow) !important;
         transform: translateY(-5px) !important; /* Highlights/Pops up the tab */
         box-shadow: 0px 5px 10px rgba(0, 0, 0, 0.2) !important;
