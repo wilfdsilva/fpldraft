@@ -212,6 +212,11 @@ if league_id:
             points_pivot["Total"] = 0
             points_pivot["Average"] = 0.0
 
+        # ---> REORDER COLUMNS HERE <---
+        # Shift Total and Average to the start of the dataframe
+        new_col_order = ["Total", "Average"] + all_gw_cols
+        points_pivot = points_pivot[new_col_order]
+
         # 2. WEEKLY PODIUM WINNERS
         winners_dict = {1: {}, 2: {}, 3: {}, 4: {}}
         for gw in range(1, 39):
