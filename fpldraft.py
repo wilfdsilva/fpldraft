@@ -35,34 +35,30 @@ st.markdown("""
     }
     
     /* === TABS CUSTOMIZATION === */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        padding-top: 10px;
-    }
-    
-    /* Base style for ALL tabs (Inactive & Active) */
+    /* Remove previous heavy formatting to return to Streamlit's native structure */
     .stTabs [data-baseweb="tab"] {
-        background-color: var(--epl-purple) !important;
-        border-radius: 8px 8px 0px 0px !important;
-        padding: 10px 15px !important;
-        border-bottom: 5px solid var(--epl-purple) !important; 
-        transition: transform 0.3s ease-in-out, box-shadow 0.3s ease-in-out !important;
+        background-color: transparent !important;
+        border: none !important;
+        padding: 8px 16px !important;
     }
     
-    /* Force ALL text inside tabs to be white */
+    /* Inactive Tab: Black Text */
     .stTabs [data-baseweb="tab"] span, 
     .stTabs [data-baseweb="tab"] p, 
     .stTabs [data-baseweb="tab"] div {
-        color: #ffffff !important;
-        font-weight: 800 !important;
+        color: #000000 !important;
+        font-weight: bold !important;
     }
     
-    /* ACTIVE TAB: Pop up and Yellow underline */
+    /* ACTIVE TAB: Black Background, White Text */
     .stTabs [aria-selected="true"] {
-        background-color: var(--epl-purple) !important;
-        border-bottom: 5px solid var(--epl-yellow) !important;
-        transform: translateY(-5px) !important; /* Highlights/Pops up the tab */
-        box-shadow: 0px 5px 10px rgba(0, 0, 0, 0.2) !important;
+        background-color: #000000 !important;
+        border-radius: 6px;
+    }
+    .stTabs [aria-selected="true"] span, 
+    .stTabs [aria-selected="true"] p, 
+    .stTabs [aria-selected="true"] div {
+        color: #ffffff !important;
     }
     /* ========================== */
     
