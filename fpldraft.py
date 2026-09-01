@@ -77,6 +77,122 @@ def load_league_data(league_id: str):
 
 
 # ==========================================
+# DERIVED TABLES (CACHED so widget interactions like the MOTM month
+# selector don't force a full recompute on every Streamlit rerun)
+# ==========================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
+    all_gw_cols = [f"GW{i}" for i in range(1, 39)]
+    all_managers = sorted(raw_df["Teams"].unique()) if not raw_df.empty else []
+    played_gw_cols = [f"GW{i}" for i in range(1, max_played_gw + 1)]
+
+    # 1. POINTS MATRIX — nullable Int64 so unplayed GWs stay as <NA> instead of
+    # forcing the column to float (which is what produced "None"/decimals before)
+    if not raw_df.empty:
+        points_pivot = raw_df.pivot(index="Teams", columns="GW", values="Points").reindex(columns=range(1, 39))
+    else:
+        points_pivot = pd.DataFrame(index=all_managers, columns=range(1, 39))
+
+    points_pivot.columns = all_gw_cols
+    points_pivot = points_pivot.astype("Int64")
+
+    if played_gw_cols:
+        totals = points_pivot[played_gw_cols].sum(axis=1, skipna=True).astype("Int64")
+        play_counts = points_pivot[played_gw_cols].notna().sum(axis=1).replace(0, pd.NA)
+        averages = (totals / play_counts).round(0).fillna(0).astype("Int64")
+        points_pivot["Total"] = totals
+        points_pivot["Average"] = averages
+    else:
+        points_pivot["Total"] = pd.array([0] * len(points_pivot), dtype="Int64")
+        points_pivot["Average"] = pd.array([0] * len(points_pivot), dtype="Int64")
+
+    points_pivot = points_pivot[["Total", "Average"] + all_gw_cols]
+
+    # 2. WEEKLY PODIUM WINNERS
+    winners_dict = {pos: {f"GW{gw}": "" for gw in range(1, 39)} for pos in range(1, 5)}
+    played_df = raw_df[raw_df["GW"] <= max_played_gw] if max_played_gw else raw_df.iloc[0:0]
+    if not played_df.empty:
+        ranked = played_df.assign(
+            Rank=played_df.groupby("GW")["Points"].rank(method="first", ascending=False)
+        )
+        top4 = ranked[ranked["Rank"] <= 4]
+        for gw, team, pos in zip(top4["GW"], top4["Teams"], top4["Rank"]):
+            winners_dict[int(pos)][f"GW{int(gw)}"] = team
+
+    winners_df = pd.DataFrame(winners_dict).T
+    winners_df.index.name = "Winners"
+
+    # 3. MOTM CASH CALCULATION (rounded to whole rupees, no decimals)
+    motm_wins_count = {m: 0 for m in all_managers}
+    motm_cash_won = {m: 0 for m in all_managers}
+    for month, gws in GW_MONTH_MAPPING.items():
+        if all(gw <= max_played_gw for gw in gws):
+            m_df = raw_df[raw_df["GW"].isin(gws)]
+            if not m_df.empty:
+                m_totals = m_df.groupby("Teams")["Points"].sum()
+                top_pts = m_totals.max()
+                month_winners = m_totals[m_totals == top_pts].index.tolist()
+                prize_per_mgr = round(MOTM_PRIZE / len(month_winners))
+                for w in month_winners:
+                    motm_wins_count[w] += 1
+                    motm_cash_won[w] += prize_per_mgr
+
+    # 4. FINAL STANDINGS CASH
+    season_cash_won = {m: 0 for m in all_managers}
+    if max_played_gw == 38:
+        final_ranks = points_pivot["Total"].sort_values(ascending=False).index.tolist()
+        if len(final_ranks) >= 1:
+            season_cash_won[final_ranks[0]] += SEASON_1ST_PRIZE
+        if len(final_ranks) >= 2:
+            season_cash_won[final_ranks[1]] += SEASON_2ND_PRIZE
+
+    # 5. SUMMARY & CASH MATRIX — nullable Int64 so unplayed GWs stay blank, not "None"
+    summary_data = []
+    cash_matrix = pd.DataFrame(pd.NA, index=all_managers, columns=all_gw_cols, dtype="Int64")
+
+    for manager in all_managers:
+        counts = {1: 0, 2: 0, 3: 0, 4: 0}
+        for gw in range(1, max_played_gw + 1):
+            col_name = f"GW{gw}"
+            cash_matrix.loc[manager, col_name] = 0  # Default played Gameweek to 0
+            for pos in [1, 2, 3, 4]:
+                if winners_dict[pos].get(col_name) == manager:
+                    counts[pos] += 1
+                    cash_matrix.loc[manager, col_name] = WEEKLY_PRIZE_MAP[pos]
+
+        weekly_amount = sum(counts[p] * WEEKLY_PRIZE_MAP[p] for p in WEEKLY_PRIZE_MAP)
+        motm_amount = motm_cash_won[manager]
+        season_amount = season_cash_won[manager]
+        total_cash = weekly_amount + motm_amount + season_amount
+
+        summary_data.append({
+            "Teams": manager,
+            "1st (GW)": counts[1],
+            "2nd (GW)": counts[2],
+            "3rd (GW)": counts[3],
+            "4th (GW)": counts[4],
+            "MOTM Wins": motm_wins_count[manager],
+            "Weekly Cash (₹)": int(weekly_amount),
+            "MOTM Cash (₹)": int(motm_amount),
+            "Season End Cash (₹)": int(season_amount),
+            "Total Cash (₹)": int(total_cash)
+        })
+
+    if summary_data:
+        summary_df = pd.DataFrame(summary_data).set_index("Teams")
+        cash_matrix["Total Weekly Cash"] = cash_matrix[played_gw_cols].sum(axis=1) if played_gw_cols else 0
+    else:
+        summary_df = pd.DataFrame()
+
+    return points_pivot, winners_df, summary_df, cash_matrix, all_managers, played_gw_cols
+
+
+def _blank_nulls(df: pd.DataFrame) -> pd.DataFrame:
+    """Render nullable/NaN cells as blank strings without turning played values into decimals."""
+    return df.astype(object).where(df.notna(), "")
+
+
+# ==========================================
 # MONTE CARLO PROJECTION FUNCTIONS (VECTORIZED)
 # ==========================================
 def _manager_stats(raw_df, managers):
@@ -201,116 +317,17 @@ if league_id:
     if error:
         st.error(error)
     elif raw_df is not None and not raw_df.empty:
-        
-        # ==========================================
-        # VALIDATION: CONSIDER ONLY GWs WITH POINTS > 0
-        # ==========================================
+
+        # Only consider GWs where at least someone actually scored
         gw_sums = raw_df.groupby("GW")["Points"].sum()
         valid_gws = gw_sums[gw_sums > 0].index.tolist()
         raw_df = raw_df[raw_df["GW"].isin(valid_gws)]
-        
+
         max_played_gw = int(raw_df["GW"].max()) if not raw_df.empty else 0
-        all_gw_cols = [f"GW{i}" for i in range(1, 39)]
-        all_managers = sorted(raw_df["Teams"].unique()) if not raw_df.empty else []
-        played_gw_cols = [f"GW{i}" for i in range(1, max_played_gw + 1)]
 
-        # 1. POINTS MATRIX
-        if not raw_df.empty:
-            points_pivot = raw_df.pivot(index="Teams", columns="GW", values="Points").reindex(columns=range(1, 39))
-        else:
-            points_pivot = pd.DataFrame(index=all_managers, columns=range(1, 39))
-            
-        points_pivot.columns = all_gw_cols
-        if played_gw_cols:
-            points_pivot["Total"] = points_pivot[played_gw_cols].sum(axis=1).round(0).astype(int)
-            points_pivot["Average"] = points_pivot[played_gw_cols].mean(axis=1).fillna(0).round(0).astype(int)
-        else:
-            points_pivot["Total"] = 0
-            points_pivot["Average"] = 0
-
-        # ---> REORDER COLUMNS HERE <---
-        new_col_order = ["Total", "Average"] + all_gw_cols
-        points_pivot = points_pivot[new_col_order]
-
-        # 2. WEEKLY PODIUM WINNERS
-        winners_dict = {1: {}, 2: {}, 3: {}, 4: {}}
-        for gw in range(1, 39):
-            col_name = f"GW{gw}"
-            if gw <= max_played_gw:
-                gw_ranks = raw_df[raw_df["GW"] == gw].sort_values(by="Points", ascending=False).reset_index(drop=True)
-                for pos in range(1, 5):
-                    winners_dict[pos][col_name] = gw_ranks.loc[pos - 1, "Teams"] if len(gw_ranks) >= pos else ""
-            else:
-                for pos in range(1, 5):
-                    winners_dict[pos][col_name] = ""
-
-        winners_df = pd.DataFrame(winners_dict).T
-        winners_df.index.name = "Winners"
-
-        # 3. MOTM CASH CALCULATION (rounded to whole rupees, no decimals)
-        motm_wins_count = {m: 0 for m in all_managers}
-        motm_cash_won = {m: 0 for m in all_managers}
-
-        for month, gws in GW_MONTH_MAPPING.items():
-            if all(gw <= max_played_gw for gw in gws):  
-                m_df = raw_df[raw_df["GW"].isin(gws)]
-                if not m_df.empty:
-                    m_totals = m_df.groupby("Teams")["Points"].sum()
-                    top_pts = m_totals.max()
-                    month_winners = m_totals[m_totals == top_pts].index.tolist()
-                    prize_per_mgr = round(MOTM_PRIZE / len(month_winners))
-                    for w in month_winners:
-                        motm_wins_count[w] += 1
-                        motm_cash_won[w] += prize_per_mgr
-
-        # 4. FINAL STANDINGS CASH
-        season_cash_won = {m: 0 for m in all_managers}
-        if max_played_gw == 38:
-            final_ranks = points_pivot["Total"].sort_values(ascending=False).index.tolist()
-            if len(final_ranks) >= 1:
-                season_cash_won[final_ranks[0]] += SEASON_1ST_PRIZE
-            if len(final_ranks) >= 2:
-                season_cash_won[final_ranks[1]] += SEASON_2ND_PRIZE
-
-        # 5. SUMMARY & MATRIX
-        summary_data = []
-        # Nullable integer dtype so unplayed gameweeks stay blank without forcing decimals
-        cash_matrix = pd.DataFrame(pd.NA, index=all_managers, columns=all_gw_cols, dtype="Int64")
-
-        for manager in all_managers:
-            counts = {1: 0, 2: 0, 3: 0, 4: 0}
-            for gw in range(1, max_played_gw + 1):
-                col_name = f"GW{gw}"
-                cash_matrix.loc[manager, col_name] = 0  # Default played Gameweek to 0
-                for pos in [1, 2, 3, 4]:
-                    if winners_dict[pos].get(col_name) == manager:
-                        counts[pos] += 1
-                        cash_matrix.loc[manager, col_name] = WEEKLY_PRIZE_MAP[pos]
-
-            weekly_amount = sum(counts[p] * WEEKLY_PRIZE_MAP[p] for p in WEEKLY_PRIZE_MAP)
-            motm_amount = motm_cash_won[manager]
-            season_amount = season_cash_won[manager]
-            total_cash = weekly_amount + motm_amount + season_amount
-
-            summary_data.append({
-                "Teams": manager,
-                "1st (GW)": counts[1],
-                "2nd (GW)": counts[2],
-                "3rd (GW)": counts[3],
-                "4th (GW)": counts[4],
-                "MOTM Wins": motm_wins_count[manager],
-                "Weekly Cash (₹)": int(weekly_amount),
-                "MOTM Cash (₹)": int(motm_amount),
-                "Season End Cash (₹)": int(season_amount),
-                "Total Cash (₹)": int(total_cash)
-            })
-
-        if summary_data:
-            summary_df = pd.DataFrame(summary_data).set_index("Teams")
-            # Calculate total summing only over the gameweeks played so far
-            cash_matrix["Total Weekly Cash"] = cash_matrix[played_gw_cols].sum(axis=1) if played_gw_cols else 0
-        else:
-            summary_df = pd.DataFrame()
+        points_pivot, winners_df, summary_df, cash_matrix, all_managers, played_gw_cols = build_dashboard_tables(
+            raw_df, max_played_gw
+        )
 
         # ==========================================
         # DASHBOARD TABS
@@ -321,10 +338,10 @@ if league_id:
 
         with tab_overview:
             st.subheader("📋 Points Matrix (GW1 - GW38)")
-            st.dataframe(points_pivot, use_container_width=True)
+            st.dataframe(_blank_nulls(points_pivot), use_container_width=True)
 
             st.subheader("🏆 Weekly Podium Winners (1st - 4th)")
-            st.dataframe(winners_df.fillna(""), use_container_width=True)
+            st.dataframe(winners_df, use_container_width=True)
 
         with tab_cash:
             col_left, col_right = st.columns([2, 1])
@@ -342,13 +359,13 @@ if league_id:
 
             st.markdown("---")
             st.subheader("💳 Weekly Cash Won per Gameweek (₹)")
-            st.dataframe(cash_matrix, use_container_width=True)
+            st.dataframe(_blank_nulls(cash_matrix), use_container_width=True)
 
         with tab_motm:
             st.subheader("👑 Manager of the Month Standings")
             selected_month = st.selectbox("Select Calendar Month", list(GW_MONTH_MAPPING.keys()))
             target_gws = GW_MONTH_MAPPING[selected_month]
-            
+
             is_month_complete = all(gw <= max_played_gw for gw in target_gws)
             if is_month_complete:
                 st.write("✅ **Month Completed (Prize Awarded)**")
@@ -357,25 +374,18 @@ if league_id:
 
             motm_filtered = raw_df[raw_df["GW"].isin(target_gws)]
             if not motm_filtered.empty:
-                # Pivot to show individual GW points columns
                 motm_pivot = motm_filtered.pivot(index="Teams", columns="GW", values="Points")
-                
-                # Make sure all GWs in the month appear as columns, even if unplayed
+
                 for gw in target_gws:
                     if gw not in motm_pivot.columns:
                         motm_pivot[gw] = np.nan
-                        
-                # Reorder to ensure chronological GW order
-                motm_pivot = motm_pivot[target_gws]
-                
-                # Add the Total Points column at the end
-                motm_pivot["Total Points"] = motm_pivot.sum(axis=1)
-                
-                # Sort and index
+
+                motm_pivot = motm_pivot[target_gws].astype("Int64")
+                motm_pivot["Total Points"] = motm_pivot.sum(axis=1, skipna=True).astype("Int64")
+
                 motm_pivot = motm_pivot.sort_values(by="Total Points", ascending=False).reset_index()
                 motm_pivot.index += 1
-                
-                # Rename the columns so they say 'GW1', 'GW2', instead of '1', '2'
+
                 rename_cols = {gw: f"GW{gw}" for gw in target_gws}
                 motm_pivot = motm_pivot.rename(columns=rename_cols)
 
@@ -384,14 +394,13 @@ if league_id:
 
                 if is_month_complete:
                     st.success(
-                        f"🎉 Official MOTM Winner(s): {', '.join(current_leaders)} with {top_score:.0f} pts "
+                        f"🎉 Official MOTM Winner(s): {', '.join(current_leaders)} with {int(top_score)} pts "
                         f"(Won ₹{round(MOTM_PRIZE / len(current_leaders))} each)!"
                     )
                 else:
-                    st.info(f"Leader so far: {', '.join(current_leaders)} ({top_score:.0f} pts). Cash will be awarded after all GWs finish.")
-                
-                # Display the dataframe and use fillna("") to blank out unplayed gameweeks
-                st.dataframe(motm_pivot.fillna(""), use_container_width=True)
+                    st.info(f"Leader so far: {', '.join(current_leaders)} ({int(top_score)} pts). Cash will be awarded after all GWs finish.")
+
+                st.dataframe(_blank_nulls(motm_pivot), use_container_width=True)
             else:
                 st.info(f"No Gameweek points finalized yet for {selected_month} (GWs: {target_gws}).")
 
@@ -410,11 +419,11 @@ if league_id:
                     motm_probs = run_monte_carlo_motm_projections(raw_df, tuple(all_managers), tuple(target_gws), max_played_gw)
                     motm_prob_df = pd.DataFrame([{"Teams": m, "Win MOTM Prob (%)": f"{motm_probs.get(m, 0)}%"} for m in all_managers]).sort_values(by="Win MOTM Prob (%)", ascending=False).reset_index(drop=True)
                     st.dataframe(motm_prob_df, use_container_width=True, hide_index=True)
-                    
+
         with tab_live:
             st.subheader("🔴 Live Gameweek Points Tracker")
             st.markdown("Monitor live points. *(If the embed fails, [click here to open the tracker](https://www.anewpla.net/fpl/live/))*")
-            
+
             components.html(
                 """
                 <iframe 
