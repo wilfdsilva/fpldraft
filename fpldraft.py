@@ -34,34 +34,6 @@ st.markdown("""
         font-family: 'Arial Black', sans-serif;
     }
     
-    /* === TABS CUSTOMIZATION === */
-    /* Remove previous heavy formatting to return to Streamlit's native structure */
-    .stTabs [data-baseweb="tab"] {
-        background-color: transparent !important;
-        border: none !important;
-        padding: 8px 16px !important;
-    }
-    
-    /* Inactive Tab: Black Text */
-    .stTabs [data-baseweb="tab"] span, 
-    .stTabs [data-baseweb="tab"] p, 
-    .stTabs [data-baseweb="tab"] div {
-        color: #000000 !important;
-        font-weight: bold !important;
-    }
-    
-    /* ACTIVE TAB: Black Background, White Text */
-    .stTabs [aria-selected="true"] {
-        background-color: #000000 !important;
-        border-radius: 6px;
-    }
-    .stTabs [aria-selected="true"] span, 
-    .stTabs [aria-selected="true"] p, 
-    .stTabs [aria-selected="true"] div {
-        color: #ffffff !important;
-    }
-    /* ========================== */
-    
     /* Sidebar */
     section[data-testid="stSidebar"] {
         background-color: var(--epl-purple);
@@ -152,38 +124,40 @@ GW_MONTH_MAPPING = {
 def load_league_data(league_id: str):
     """Fetches league managers and full Gameweek history concurrently from FPL API."""
     try:
-        res = requests.get(LEAGUE_DETAILS_URL.format(league_id))
-        if res.status_code != 200:
-            return None, f"Failed to retrieve league details (Status code: {res.status_code})"
-        
-        league_data = res.json()
-        entries = league_data.get("league_entries", [])
-        if not entries:
-            return None, "No teams found in this league."
+        with requests.Session() as session:
+            res = session.get(LEAGUE_DETAILS_URL.format(league_id))
+            if res.status_code != 200:
+                return None, f"Failed to retrieve league details (Status code: {res.status_code})"
 
-        def fetch_entry(entry):
-            entry_id = entry["entry_id"]
-            manager_name = entry["player_first_name"]
-            team_name = entry["entry_name"]
-            
-            records = []
-            hist_res = requests.get(ENTRY_HISTORY_URL.format(entry_id))
-            if hist_res.status_code == 200:
-                history = hist_res.json().get("history", [])
-                for gw in history:
-                    records.append({
-                        "entry_id": entry_id,
-                        "Teams": manager_name,
-                        "Team Name": team_name,
-                        "GW": gw["event"],
-                        "Points": gw["points"]
-                    })
-            return records
+            league_data = res.json()
+            entries = league_data.get("league_entries", [])
+            if not entries:
+                return None, "No teams found in this league."
 
-        all_records = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            for result in executor.map(fetch_entry, entries):
-                all_records.extend(result)
+            def fetch_entry(entry):
+                entry_id = entry["entry_id"]
+                manager_name = entry["player_first_name"]
+                team_name = entry["entry_name"]
+
+                records = []
+                hist_res = session.get(ENTRY_HISTORY_URL.format(entry_id))
+                if hist_res.status_code == 200:
+                    history = hist_res.json().get("history", [])
+                    for gw in history:
+                        records.append({
+                            "entry_id": entry_id,
+                            "Teams": manager_name,
+                            "Team Name": team_name,
+                            "GW": gw["event"],
+                            "Points": gw["points"]
+                        })
+                return records
+
+            all_records = []
+            # Reused session gives connection-pooling/keep-alive benefits across threads
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, max(1, len(entries)))) as executor:
+                for result in executor.map(fetch_entry, entries):
+                    all_records.extend(result)
 
         if not all_records:
             return None, "No history records retrieved."
@@ -195,94 +169,108 @@ def load_league_data(league_id: str):
 
 
 # ==========================================
-# MONTE CARLO PROJECTION FUNCTIONS
+# MONTE CARLO PROJECTION FUNCTIONS (VECTORIZED)
 # ==========================================
-def run_monte_carlo_season_projections(raw_df, managers, max_played_gw, num_simulations=5000):
-    stats = {}
-    current_totals = {}
-    for mgr in managers:
-        mgr_pts = raw_df[raw_df["Teams"] == mgr]["Points"].values
-        current_totals[mgr] = float(mgr_pts.sum()) if len(mgr_pts) > 0 else 0.0
-        
-        if len(mgr_pts) >= 2:
-            stats[mgr] = (float(np.mean(mgr_pts)), max(float(np.std(mgr_pts)), 6.0))
-        elif len(mgr_pts) == 1:
-            stats[mgr] = (float(mgr_pts[0]), 12.0)
+def _manager_stats(raw_df, managers):
+    """Returns per-manager (mean, std) point stats as numpy arrays."""
+    means = np.empty(len(managers))
+    stds = np.empty(len(managers))
+    for i, mgr in enumerate(managers):
+        pts = raw_df.loc[raw_df["Teams"] == mgr, "Points"].values
+        if len(pts) >= 2:
+            means[i], stds[i] = pts.mean(), max(pts.std(), 6.0)
+        elif len(pts) == 1:
+            means[i], stds[i] = pts[0], 12.0
         else:
-            stats[mgr] = (45.0, 12.0)
+            means[i], stds[i] = 45.0, 12.0
+    return means, stds
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_monte_carlo_season_projections(raw_df, managers, max_played_gw, num_simulations=5000):
+    managers = list(managers)
+    if not managers:
+        return {}
+
+    means, stds = _manager_stats(raw_df, managers)
+    current_totals = np.array([
+        raw_df.loc[raw_df["Teams"] == mgr, "Points"].values.sum() for mgr in managers
+    ], dtype=float)
 
     remaining_gws = 38 - max_played_gw
     if remaining_gws <= 0:
-        sorted_mgrs = sorted(current_totals.items(), key=lambda x: x[1], reverse=True)
-        if not sorted_mgrs: return {}
-        return {
-            m: (100.0 if m == sorted_mgrs[0][0] else 0.0, 100.0 if len(sorted_mgrs) > 1 and m == sorted_mgrs[1][0] else 0.0)
-            for m in managers
-        }
+        order = np.argsort(-current_totals)
+        result = {m: (0, 0) for m in managers}
+        top_mgr = managers[order[0]]
+        result[top_mgr] = (100, result[top_mgr][1])
+        if len(order) > 1:
+            second_mgr = managers[order[1]]
+            result[second_mgr] = (result[second_mgr][0], 100)
+        return result
 
-    first_counts = {m: 0 for m in managers}
-    second_counts = {m: 0 for m in managers}
+    # Simulate all managers & all simulations at once: (num_simulations, num_managers, remaining_gws)
+    sims = np.random.normal(
+        loc=means[None, :, None],
+        scale=stds[None, :, None],
+        size=(num_simulations, len(managers), remaining_gws)
+    )
+    sim_totals = current_totals[None, :] + np.maximum(sims.sum(axis=2), 0)
 
-    for _ in range(num_simulations):
-        sim_scores = {}
-        for m in managers:
-            mean, std = stats[m]
-            sim_pts = np.sum(np.random.normal(mean, std, remaining_gws))
-            sim_scores[m] = current_totals[m] + max(0, sim_pts)
-
-        ranked = sorted(sim_scores.items(), key=lambda x: x[1], reverse=True)
-        first_counts[ranked[0][0]] += 1
-        if len(ranked) > 1:
-            second_counts[ranked[1][0]] += 1
+    order = np.argsort(-sim_totals, axis=1)
+    first_counts = np.bincount(order[:, 0], minlength=len(managers))
+    second_counts = (
+        np.bincount(order[:, 1], minlength=len(managers)) if len(managers) > 1
+        else np.zeros(len(managers), dtype=int)
+    )
 
     return {
-        m: (round((first_counts[m] / num_simulations) * 100, 1), round((second_counts[m] / num_simulations) * 100, 1))
-        for m in managers
+        managers[i]: (
+            int(round(first_counts[i] / num_simulations * 100)),
+            int(round(second_counts[i] / num_simulations * 100))
+        )
+        for i in range(len(managers))
     }
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def run_monte_carlo_motm_projections(raw_df, managers, month_gws, max_played_gw, num_simulations=5000):
+    managers = list(managers)
+    month_gws = list(month_gws)
+    if not managers:
+        return {}
+
     completed_in_month = [gw for gw in month_gws if gw <= max_played_gw]
     remaining_in_month = [gw for gw in month_gws if gw > max_played_gw]
-    current_month_pts = {}
-    stats = {}
 
-    for mgr in managers:
-        pts = raw_df[(raw_df["Teams"] == mgr) & (raw_df["GW"].isin(completed_in_month))]["Points"].values
-        current_month_pts[mgr] = float(pts.sum()) if len(pts) > 0 else 0.0
-        
-        all_pts = raw_df[raw_df["Teams"] == mgr]["Points"].values
-        if len(all_pts) >= 2:
-            stats[mgr] = (float(np.mean(all_pts)), max(float(np.std(all_pts)), 6.0))
-        elif len(all_pts) == 1:
-            stats[mgr] = (float(all_pts[0]), 12.0)
-        else:
-            stats[mgr] = (45.0, 12.0)
+    means, stds = _manager_stats(raw_df, managers)
+    current_month_pts = np.array([
+        raw_df.loc[(raw_df["Teams"] == mgr) & (raw_df["GW"].isin(completed_in_month)), "Points"].values.sum()
+        for mgr in managers
+    ], dtype=float)
 
     if not remaining_in_month:
-        sorted_m = sorted(current_month_pts.items(), key=lambda x: x[1], reverse=True)
-        if not sorted_m: return {m: 0.0 for m in managers}
-        top_score = sorted_m[0][1]
-        winners = [m for m, pts in sorted_m if pts == top_score]
-        return {m: (100.0 / len(winners) if m in winners else 0.0) for m in managers}
+        top_score = current_month_pts.max()
+        winners = current_month_pts == top_score
+        win_share = 100 / winners.sum()
+        return {managers[i]: (int(round(win_share)) if winners[i] else 0) for i in range(len(managers))}
 
-    win_counts = {m: 0 for m in managers}
     rem_count = len(remaining_in_month)
+    sims = np.random.normal(
+        loc=means[None, :, None],
+        scale=stds[None, :, None],
+        size=(num_simulations, len(managers), rem_count)
+    )
+    sim_totals = current_month_pts[None, :] + np.maximum(sims.sum(axis=2), 0)
 
-    for _ in range(num_simulations):
-        sim_scores = {}
-        for m in managers:
-            mean, std = stats[m]
-            sim_pts = np.sum(np.random.normal(mean, std, rem_count))
-            sim_scores[m] = current_month_pts[m] + max(0, sim_pts)
+    top_scores = sim_totals.max(axis=1, keepdims=True)
+    win_mask = sim_totals == top_scores
+    win_shares = win_mask / win_mask.sum(axis=1, keepdims=True)
+    win_counts = win_shares.sum(axis=0)
 
-        ranked = sorted(sim_scores.items(), key=lambda x: x[1], reverse=True)
-        top_score = ranked[0][1]
-        sim_winners = [m for m, pts in ranked if pts == top_score]
-        for w in sim_winners:
-            win_counts[w] += (1.0 / len(sim_winners))
-
-    return {m: round((win_counts[m] / num_simulations) * 100, 1) for m in managers}
+    return {
+        managers[i]: int(round(win_counts[i] / num_simulations * 100))
+        for i in range(len(managers))
+    }
 
 
 # ==========================================
@@ -326,8 +314,8 @@ if league_id:
             
         points_pivot.columns = all_gw_cols
         if played_gw_cols:
-            points_pivot["Total"] = points_pivot[played_gw_cols].sum(axis=1)
-            points_pivot["Average"] = (points_pivot[played_gw_cols].mean(axis=1)).fillna(0).round(0).astype(int)
+            points_pivot["Total"] = points_pivot[played_gw_cols].sum(axis=1).round(0).astype(int)
+            points_pivot["Average"] = points_pivot[played_gw_cols].mean(axis=1).fillna(0).round(0).astype(int)
         else:
             points_pivot["Total"] = 0
             points_pivot["Average"] = 0
@@ -351,9 +339,9 @@ if league_id:
         winners_df = pd.DataFrame(winners_dict).T
         winners_df.index.name = "Winners"
 
-        # 3. MOTM CASH CALCULATION
+        # 3. MOTM CASH CALCULATION (rounded to whole rupees, no decimals)
         motm_wins_count = {m: 0 for m in all_managers}
-        motm_cash_won = {m: 0.0 for m in all_managers}
+        motm_cash_won = {m: 0 for m in all_managers}
 
         for month, gws in GW_MONTH_MAPPING.items():
             if all(gw <= max_played_gw for gw in gws):  
@@ -362,7 +350,7 @@ if league_id:
                     m_totals = m_df.groupby("Teams")["Points"].sum()
                     top_pts = m_totals.max()
                     month_winners = m_totals[m_totals == top_pts].index.tolist()
-                    prize_per_mgr = MOTM_PRIZE / len(month_winners)
+                    prize_per_mgr = round(MOTM_PRIZE / len(month_winners))
                     for w in month_winners:
                         motm_wins_count[w] += 1
                         motm_cash_won[w] += prize_per_mgr
@@ -403,10 +391,10 @@ if league_id:
                 "3rd (GW)": counts[3],
                 "4th (GW)": counts[4],
                 "MOTM Wins": motm_wins_count[manager],
-                "Weekly Cash (₹)": weekly_amount,
-                "MOTM Cash (₹)": int(motm_amount) if motm_amount.is_integer() else motm_amount,
-                "Season End Cash (₹)": season_amount,
-                "Total Cash (₹)": int(total_cash) if float(total_cash).is_integer() else total_cash
+                "Weekly Cash (₹)": int(weekly_amount),
+                "MOTM Cash (₹)": int(motm_amount),
+                "Season End Cash (₹)": int(season_amount),
+                "Total Cash (₹)": int(total_cash)
             })
 
         if summary_data:
@@ -497,11 +485,11 @@ if league_id:
                     # Black shape with white text via HTML
                     st.markdown(f"""
                     <div style="background-color: black; color: white; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
-                        🎉 <b>Official MOTM Winner(s):</b> {', '.join(current_leaders)} with <b>{top_score}</b> pts (Won ₹{MOTM_PRIZE/len(current_leaders):.0f} each)!
+                        🎉 <b>Official MOTM Winner(s):</b> {', '.join(current_leaders)} with <b>{top_score:.0f}</b> pts (Won ₹{round(MOTM_PRIZE/len(current_leaders))} each)!
                     </div>
                     """, unsafe_allow_html=True)
                 else:
-                    st.info(f"Leader so far: **{', '.join(current_leaders)}** ({top_score} pts). Cash will be awarded after all GWs finish.")
+                    st.info(f"Leader so far: **{', '.join(current_leaders)}** ({top_score:.0f} pts). Cash will be awarded after all GWs finish.")
                 
                 # Display the dataframe and use fillna("") to blank out unplayed gameweeks
                 st.dataframe(motm_pivot.fillna("").style.set_properties(**{'text-align': 'center'}), use_container_width=True)
@@ -515,12 +503,12 @@ if league_id:
                 col_seas, col_month = st.columns(2)
                 with col_seas:
                     st.subheader("🏆 End-of-Season Probability (GW38)")
-                    season_probs = run_monte_carlo_season_projections(raw_df, all_managers, max_played_gw)
-                    season_prob_df = pd.DataFrame([{"Teams": m, "Current Pts": int(points_pivot.loc[m, "Total"]) if "Total" in points_pivot.columns else 0, "1st Place (%)": f"{season_probs.get(m, (0,0))[0]}%", "2nd Place (%)": f"{season_probs.get(m, (0,0))[1]}%"} for m in all_managers]).sort_values(by="Current Pts", ascending=False).reset_index(drop=True)
+                    season_probs = run_monte_carlo_season_projections(raw_df, tuple(all_managers), max_played_gw)
+                    season_prob_df = pd.DataFrame([{"Teams": m, "Current Pts": int(points_pivot.loc[m, "Total"]) if "Total" in points_pivot.columns else 0, "1st Place (%)": f"{season_probs.get(m, (0, 0))[0]}%", "2nd Place (%)": f"{season_probs.get(m, (0, 0))[1]}%"} for m in all_managers]).sort_values(by="Current Pts", ascending=False).reset_index(drop=True)
                     st.dataframe(season_prob_df.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
                 with col_month:
                     st.subheader(f"👑 MOTM Probability: {selected_month}")
-                    motm_probs = run_monte_carlo_motm_projections(raw_df, all_managers, target_gws, max_played_gw)
+                    motm_probs = run_monte_carlo_motm_projections(raw_df, tuple(all_managers), tuple(target_gws), max_played_gw)
                     motm_prob_df = pd.DataFrame([{"Teams": m, "Win MOTM Prob (%)": f"{motm_probs.get(m, 0)}%"} for m in all_managers]).sort_values(by="Win MOTM Prob (%)", ascending=False).reset_index(drop=True)
                     st.dataframe(motm_prob_df.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
                     
