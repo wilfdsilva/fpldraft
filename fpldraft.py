@@ -8,98 +8,6 @@ import concurrent.futures
 # --- Page Configuration ---
 st.set_page_config(page_title="FPL Draft Rewards Dashboard", page_icon="⚽", layout="wide")
 
-# ==========================================
-# EPL THEME & CUSTOM FOOTBALL CURSOR
-# ==========================================
-# 1. Injecting standard EPL styling via CSS
-st.markdown("""
-<style>
-    /* Official EPL Theme Colors */
-    :root {
-        --epl-purple: #38003C;
-        --epl-green: #00FF85;
-        --epl-pink: #E90052;
-        --epl-cyan: #04F5FF;
-        --epl-yellow: #FFEB00;
-    }
-    
-    .stApp {
-        background-color: #f9f9f9;
-    }
-    
-    /* Headers & Text */
-    h1, h2, h3 {
-        color: var(--epl-purple) !important;
-        font-weight: 900 !important;
-        font-family: 'Arial Black', sans-serif;
-    }
-    
-    /* Sidebar */
-    section[data-testid="stSidebar"] {
-        background-color: var(--epl-purple);
-        color: white;
-    }
-    
-    /* Buttons */
-    .stButton>button {
-        background-color: var(--epl-green);
-        color: var(--epl-purple);
-        border: 2px solid var(--epl-purple);
-        font-weight: 900;
-        border-radius: 8px;
-        transition: all 0.3s ease;
-    }
-    .stButton>button:hover {
-        background-color: var(--epl-pink);
-        color: white;
-        border-color: white;
-        transform: scale(1.05);
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# 2. Injecting JavaScript to handle the spinning ball animation on click
-components.html("""
-<script>
-try {
-    const doc = window.parent.document;
-    if (!doc.getElementById('custom-football-cursor')) {
-        const cursor = doc.createElement('div');
-        cursor.id = 'custom-football-cursor';
-        cursor.innerHTML = '⚽';
-        cursor.style.position = 'fixed';
-        cursor.style.pointerEvents = 'none';
-        cursor.style.zIndex = '99999999';
-        cursor.style.fontSize = '24px';
-        cursor.style.transition = 'transform 0.2s ease-out';
-        cursor.style.transformOrigin = 'center';
-        
-        // Hide default cursor completely to rely on the rotating emoji
-        const style = doc.createElement('style');
-        style.innerHTML = `* { cursor: none !important; }`;
-        doc.head.appendChild(style);
-        
-        doc.body.appendChild(cursor);
-        
-        let rotation = 0;
-        doc.addEventListener('mousemove', e => {
-            cursor.style.left = (e.clientX - 12) + 'px';
-            cursor.style.top = (e.clientY - 12) + 'px';
-        });
-        doc.addEventListener('mousedown', () => {
-            rotation += 180; // Spins the ball on click
-            cursor.style.transform = `rotate(${rotation}deg) scale(1.3)`;
-        });
-        doc.addEventListener('mouseup', () => {
-            cursor.style.transform = `rotate(${rotation}deg) scale(1)`;
-        });
-    }
-} catch (e) {
-    console.log("Iframe sandboxing prevented custom JS cursor.");
-}
-</script>
-""", height=0, width=0)
-
 LEAGUE_DETAILS_URL = "https://draft.premierleague.com/api/league/{}/details"
 ENTRY_HISTORY_URL = "https://draft.premierleague.com/api/entry/{}/history"
 
@@ -366,14 +274,14 @@ if league_id:
 
         # 5. SUMMARY & MATRIX
         summary_data = []
-        # Initialize with NaN so unplayed gameweeks remain blank
-        cash_matrix = pd.DataFrame(np.nan, index=all_managers, columns=all_gw_cols)
+        # Nullable integer dtype so unplayed gameweeks stay blank without forcing decimals
+        cash_matrix = pd.DataFrame(pd.NA, index=all_managers, columns=all_gw_cols, dtype="Int64")
 
         for manager in all_managers:
             counts = {1: 0, 2: 0, 3: 0, 4: 0}
             for gw in range(1, max_played_gw + 1):
                 col_name = f"GW{gw}"
-                cash_matrix.loc[manager, col_name] = 0 # Default played Gameweek to 0
+                cash_matrix.loc[manager, col_name] = 0  # Default played Gameweek to 0
                 for pos in [1, 2, 3, 4]:
                     if winners_dict[pos].get(col_name) == manager:
                         counts[pos] += 1
@@ -413,37 +321,28 @@ if league_id:
 
         with tab_overview:
             st.subheader("📋 Points Matrix (GW1 - GW38)")
-            
-            # ---> APPLY PANDAS STYLING FOR HIGHLIGHTING AND CENTERING <---
-            formatted_pivot = points_pivot.fillna("")
-            styled_pivot = formatted_pivot.style.set_properties(**{'text-align': 'center'}).map(
-                lambda _: 'background-color: #38003c; color: #00ff85; font-weight: bold;', subset=['Total']
-            ).map(
-                lambda _: 'background-color: #e90052; color: #ffffff; font-weight: bold;', subset=['Average']
-            )
-            st.dataframe(styled_pivot, use_container_width=True)
+            st.dataframe(points_pivot, use_container_width=True)
 
             st.subheader("🏆 Weekly Podium Winners (1st - 4th)")
-            st.dataframe(winners_df.fillna("").style.set_properties(**{'text-align': 'center'}), use_container_width=True)
+            st.dataframe(winners_df.fillna(""), use_container_width=True)
 
         with tab_cash:
             col_left, col_right = st.columns([2, 1])
             with col_left:
                 st.subheader("🎖️ Podium Counts & Total Cash Won")
                 if not summary_df.empty:
-                    st.dataframe(summary_df.sort_values(by="Total Cash (₹)", ascending=False).style.set_properties(**{'text-align': 'center'}), use_container_width=True)
+                    st.dataframe(summary_df.sort_values(by="Total Cash (₹)", ascending=False), use_container_width=True)
             with col_right:
                 st.subheader("💵 Prize Rules")
                 prize_rule_df = pd.DataFrame({
                     "Award Category": ["Weekly 1st", "Weekly 2nd", "Weekly 3rd", "Weekly 4th", "MOTM (Complete)", "1st Overall", "2nd Overall"],
                     "Cash": [f"₹{WEEKLY_PRIZE_MAP[1]}", f"₹{WEEKLY_PRIZE_MAP[2]}", f"₹{WEEKLY_PRIZE_MAP[3]}", f"₹{WEEKLY_PRIZE_MAP[4]}", f"₹{MOTM_PRIZE}", f"₹{SEASON_1ST_PRIZE}", f"₹{SEASON_2ND_PRIZE}"]
                 })
-                st.dataframe(prize_rule_df.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
+                st.dataframe(prize_rule_df, use_container_width=True, hide_index=True)
 
             st.markdown("---")
             st.subheader("💳 Weekly Cash Won per Gameweek (₹)")
-            # Use fillna("") to visually blank out the NaN columns for unplayed GWs
-            st.dataframe(cash_matrix.fillna("").style.set_properties(**{'text-align': 'center'}), use_container_width=True)
+            st.dataframe(cash_matrix, use_container_width=True)
 
         with tab_motm:
             st.subheader("👑 Manager of the Month Standings")
@@ -451,8 +350,10 @@ if league_id:
             target_gws = GW_MONTH_MAPPING[selected_month]
             
             is_month_complete = all(gw <= max_played_gw for gw in target_gws)
-            status_text = '<span style="color: black;">✅ <b>Month Completed (Prize Awarded)</b></span>' if is_month_complete else f'<span style="color: black;">⏳ <b>In Progress / Upcoming</b> (Gameweeks: {target_gws})</span>'
-            st.markdown(status_text, unsafe_allow_html=True)
+            if is_month_complete:
+                st.write("✅ **Month Completed (Prize Awarded)**")
+            else:
+                st.write(f"⏳ **In Progress / Upcoming** (Gameweeks: {target_gws})")
 
             motm_filtered = raw_df[raw_df["GW"].isin(target_gws)]
             if not motm_filtered.empty:
@@ -482,35 +383,33 @@ if league_id:
                 current_leaders = motm_pivot[motm_pivot["Total Points"] == top_score]["Teams"].tolist()
 
                 if is_month_complete:
-                    # Black shape with white text via HTML
-                    st.markdown(f"""
-                    <div style="background-color: black; color: white; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
-                        🎉 <b>Official MOTM Winner(s):</b> {', '.join(current_leaders)} with <b>{top_score:.0f}</b> pts (Won ₹{round(MOTM_PRIZE/len(current_leaders))} each)!
-                    </div>
-                    """, unsafe_allow_html=True)
+                    st.success(
+                        f"🎉 Official MOTM Winner(s): {', '.join(current_leaders)} with {top_score:.0f} pts "
+                        f"(Won ₹{round(MOTM_PRIZE / len(current_leaders))} each)!"
+                    )
                 else:
-                    st.info(f"Leader so far: **{', '.join(current_leaders)}** ({top_score:.0f} pts). Cash will be awarded after all GWs finish.")
+                    st.info(f"Leader so far: {', '.join(current_leaders)} ({top_score:.0f} pts). Cash will be awarded after all GWs finish.")
                 
                 # Display the dataframe and use fillna("") to blank out unplayed gameweeks
-                st.dataframe(motm_pivot.fillna("").style.set_properties(**{'text-align': 'center'}), use_container_width=True)
+                st.dataframe(motm_pivot.fillna(""), use_container_width=True)
             else:
                 st.info(f"No Gameweek points finalized yet for {selected_month} (GWs: {target_gws}).")
 
         with tab_prob:
             st.header("🎲 Monte Carlo Win Probability Projections")
-            st.markdown('<p style="color: black; font-size: 0.9em;">Projections based on 5,000 simulations using each manager\'s historical scoring rate and variance.</p>', unsafe_allow_html=True)
+            st.caption("Projections based on 5,000 simulations using each manager's historical scoring rate and variance.")
             if all_managers:
                 col_seas, col_month = st.columns(2)
                 with col_seas:
                     st.subheader("🏆 End-of-Season Probability (GW38)")
                     season_probs = run_monte_carlo_season_projections(raw_df, tuple(all_managers), max_played_gw)
                     season_prob_df = pd.DataFrame([{"Teams": m, "Current Pts": int(points_pivot.loc[m, "Total"]) if "Total" in points_pivot.columns else 0, "1st Place (%)": f"{season_probs.get(m, (0, 0))[0]}%", "2nd Place (%)": f"{season_probs.get(m, (0, 0))[1]}%"} for m in all_managers]).sort_values(by="Current Pts", ascending=False).reset_index(drop=True)
-                    st.dataframe(season_prob_df.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
+                    st.dataframe(season_prob_df, use_container_width=True, hide_index=True)
                 with col_month:
                     st.subheader(f"👑 MOTM Probability: {selected_month}")
                     motm_probs = run_monte_carlo_motm_projections(raw_df, tuple(all_managers), tuple(target_gws), max_played_gw)
                     motm_prob_df = pd.DataFrame([{"Teams": m, "Win MOTM Prob (%)": f"{motm_probs.get(m, 0)}%"} for m in all_managers]).sort_values(by="Win MOTM Prob (%)", ascending=False).reset_index(drop=True)
-                    st.dataframe(motm_prob_df.style.set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
+                    st.dataframe(motm_prob_df, use_container_width=True, hide_index=True)
                     
         with tab_live:
             st.subheader("🔴 Live Gameweek Points Tracker")
