@@ -17,6 +17,14 @@ MOTM_PRIZE = 200
 SEASON_1ST_PRIZE = 1000
 SEASON_2ND_PRIZE = 500
 
+# TIEBREAKER RULE:
+# If two or more managers are tied on points for a Gameweek (GW) award, or tied
+# on total points for the Monthly Manager (MOTM) award, the tie is broken by
+# whoever has the higher season-to-date cumulative points total (i.e. their
+# running Total through the GW in question / through the last GW of the
+# month). If managers are still tied after applying this tiebreaker, the
+# prize is split equally among the managers still tied.
+
 GW_MONTH_MAPPING = {
     "August": list(range(1, 3)), "September": list(range(3, 6)),
     "October": list(range(6, 10)), "November": list(range(10, 13)),
@@ -77,6 +85,26 @@ def load_league_data(league_id: str):
 
 
 # ==========================================
+# TIEBREAK HELPER
+# ==========================================
+def _cumulative_points_table(raw_df: pd.DataFrame, max_played_gw: int, managers: list) -> pd.DataFrame:
+    """
+    Returns a DataFrame indexed by manager with columns 1..max_played_gw, where
+    each cell is that manager's season-to-date cumulative points total through
+    (and including) that Gameweek. Used as the tiebreaker for GW and MOTM awards.
+    """
+    if not managers or max_played_gw <= 0:
+        return pd.DataFrame(index=managers, columns=range(1, max(max_played_gw, 0) + 1)).fillna(0).astype(int)
+
+    pivot = (
+        raw_df.pivot(index="Teams", columns="GW", values="Points")
+        .reindex(index=managers, columns=range(1, max_played_gw + 1))
+        .fillna(0)
+    )
+    return pivot.cumsum(axis=1)
+
+
+# ==========================================
 # DERIVED TABLES (CACHED so widget interactions like the MOTM month
 # selector don't force a full recompute on every Streamlit rerun)
 # ==========================================
@@ -85,6 +113,10 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
     all_gw_cols = [f"GW{i}" for i in range(1, 39)]
     all_managers = sorted(raw_df["Teams"].unique()) if not raw_df.empty else []
     played_gw_cols = [f"GW{i}" for i in range(1, max_played_gw + 1)]
+
+    # Season-to-date cumulative totals per manager, indexed by GW — this is the
+    # tiebreaker source for both weekly (GW) awards and the Monthly Manager award.
+    cum_table = _cumulative_points_table(raw_df, max_played_gw, all_managers)
 
     # 1. POINTS MATRIX — nullable Int64 so unplayed GWs stay as <NA> instead of
     # forcing the column to float (which is what produced "None"/decimals before)
@@ -109,20 +141,30 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
     points_pivot = points_pivot[["Total", "Average"] + all_gw_cols]
 
     # 2. WEEKLY PODIUM WINNERS
+    # Ties on Points for a Gameweek are broken by season-to-date cumulative
+    # total through that Gameweek (higher cumulative total wins the tie).
     winners_dict = {pos: {f"GW{gw}": "" for gw in range(1, 39)} for pos in range(1, 5)}
     played_df = raw_df[raw_df["GW"] <= max_played_gw] if max_played_gw else raw_df.iloc[0:0]
     if not played_df.empty:
-        ranked = played_df.assign(
-            Rank=played_df.groupby("GW")["Points"].rank(method="first", ascending=False)
-        )
-        top4 = ranked[ranked["Rank"] <= 4]
-        for gw, team, pos in zip(top4["GW"], top4["Teams"], top4["Rank"]):
-            winners_dict[int(pos)][f"GW{int(gw)}"] = team
+        for gw in sorted(played_df["GW"].unique()):
+            gw_df = played_df[played_df["GW"] == gw].copy()
+            if gw in cum_table.columns:
+                gw_df["CumTotal"] = gw_df["Teams"].map(cum_table[gw]).fillna(0)
+            else:
+                gw_df["CumTotal"] = 0
+            # Sort by GW Points desc, then season-to-date cumulative total desc (tiebreak)
+            gw_df = gw_df.sort_values(by=["Points", "CumTotal"], ascending=[False, False])
+            top4 = gw_df.head(4)
+            for pos, team in enumerate(top4["Teams"].tolist(), start=1):
+                winners_dict[pos][f"GW{int(gw)}"] = team
 
     winners_df = pd.DataFrame(winners_dict).T
     winners_df.index.name = "Winners"
 
     # 3. MOTM CASH CALCULATION (rounded to whole rupees, no decimals)
+    # Ties on total Points for the month are broken by season-to-date cumulative
+    # total through the last GW of that month. If still tied after that, the
+    # MOTM prize is split equally among those still tied.
     motm_wins_count = {m: 0 for m in all_managers}
     motm_cash_won = {m: 0 for m in all_managers}
     for month, gws in GW_MONTH_MAPPING.items():
@@ -132,6 +174,17 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
                 m_totals = m_df.groupby("Teams")["Points"].sum()
                 top_pts = m_totals.max()
                 month_winners = m_totals[m_totals == top_pts].index.tolist()
+
+                if len(month_winners) > 1:
+                    last_gw = max(gws)
+                    if last_gw in cum_table.columns:
+                        cum_scores = {
+                            w: (cum_table.loc[w, last_gw] if w in cum_table.index else 0)
+                            for w in month_winners
+                        }
+                        top_cum = max(cum_scores.values())
+                        month_winners = [w for w, v in cum_scores.items() if v == top_cum]
+
                 prize_per_mgr = round(MOTM_PRIZE / len(month_winners))
                 for w in month_winners:
                     motm_wins_count[w] += 1
@@ -184,7 +237,7 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
     else:
         summary_df = pd.DataFrame()
 
-    return points_pivot, winners_df, summary_df, cash_matrix, all_managers, played_gw_cols
+    return points_pivot, winners_df, summary_df, cash_matrix, all_managers, played_gw_cols, cum_table
 
 
 def _blank_nulls(df: pd.DataFrame) -> pd.DataFrame:
@@ -325,7 +378,7 @@ if league_id:
 
         max_played_gw = int(raw_df["GW"].max()) if not raw_df.empty else 0
 
-        points_pivot, winners_df, summary_df, cash_matrix, all_managers, played_gw_cols = build_dashboard_tables(
+        points_pivot, winners_df, summary_df, cash_matrix, all_managers, played_gw_cols, cum_table = build_dashboard_tables(
             raw_df, max_played_gw
         )
 
@@ -341,6 +394,7 @@ if league_id:
             st.dataframe(_blank_nulls(points_pivot), use_container_width=True)
 
             st.subheader("🏆 Weekly Podium Winners (1st - 4th)")
+            st.caption("Ties on GW points are broken by season-to-date cumulative total points.")
             st.dataframe(winners_df, use_container_width=True)
 
         with tab_cash:
@@ -356,6 +410,7 @@ if league_id:
                     "Cash": [f"₹{WEEKLY_PRIZE_MAP[1]}", f"₹{WEEKLY_PRIZE_MAP[2]}", f"₹{WEEKLY_PRIZE_MAP[3]}", f"₹{WEEKLY_PRIZE_MAP[4]}", f"₹{MOTM_PRIZE}", f"₹{SEASON_1ST_PRIZE}", f"₹{SEASON_2ND_PRIZE}"]
                 })
                 st.dataframe(prize_rule_df, use_container_width=True, hide_index=True)
+                st.caption("Ties (GW or MOTM) are broken by higher season-to-date cumulative points.")
 
             st.markdown("---")
             st.subheader("💳 Weekly Cash Won per Gameweek (₹)")
@@ -391,14 +446,34 @@ if league_id:
 
                 top_score = motm_pivot.iloc[0]["Total Points"]
                 current_leaders = motm_pivot[motm_pivot["Total Points"] == top_score]["Teams"].tolist()
+                tie_broken_by_total = False
+
+                # Apply the season-to-date cumulative-total tiebreak whenever there's
+                # a tie at the top, using the cumulative total through the latest
+                # played GW within this month.
+                if len(current_leaders) > 1:
+                    played_target_gws = [gw for gw in target_gws if gw <= max_played_gw]
+                    tiebreak_gw = max(played_target_gws) if played_target_gws else None
+                    if tiebreak_gw is not None and tiebreak_gw in cum_table.columns:
+                        cum_scores = {
+                            w: (cum_table.loc[w, tiebreak_gw] if w in cum_table.index else 0)
+                            for w in current_leaders
+                        }
+                        top_cum = max(cum_scores.values())
+                        tiebroken_leaders = [w for w, v in cum_scores.items() if v == top_cum]
+                        if len(tiebroken_leaders) < len(current_leaders):
+                            current_leaders = tiebroken_leaders
+                            tie_broken_by_total = True
+
+                tie_note = " (tie broken by season-to-date total points)" if tie_broken_by_total else ""
 
                 if is_month_complete:
                     st.success(
                         f"🎉 Official MOTM Winner(s): {', '.join(current_leaders)} with {int(top_score)} pts "
-                        f"(Won ₹{round(MOTM_PRIZE / len(current_leaders))} each)!"
+                        f"(Won ₹{round(MOTM_PRIZE / len(current_leaders))} each){tie_note}!"
                     )
                 else:
-                    st.info(f"Leader so far: {', '.join(current_leaders)} ({int(top_score)} pts). Cash will be awarded after all GWs finish.")
+                    st.info(f"Leader so far: {', '.join(current_leaders)} ({int(top_score)} pts){tie_note}. Cash will be awarded after all GWs finish.")
 
                 st.dataframe(_blank_nulls(motm_pivot), use_container_width=True)
             else:
