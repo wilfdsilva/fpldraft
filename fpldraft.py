@@ -398,7 +398,12 @@ if league_id:
 
         with tab_overview:
             st.subheader("📋 Points Matrix (GW1 - GW38)")
-            st.dataframe(_blank_nulls(points_pivot), use_container_width=True)
+            st.caption(f"Sorted by GW{max_played_gw} points (latest Gameweek), highest to lowest." if max_played_gw else "")
+            if max_played_gw and f"GW{max_played_gw}" in points_pivot.columns:
+                points_pivot_display = points_pivot.sort_values(by=f"GW{max_played_gw}", ascending=False, na_position="last")
+            else:
+                points_pivot_display = points_pivot
+            st.dataframe(_blank_nulls(points_pivot_display), use_container_width=True)
 
             st.subheader("🏆 Weekly Podium Winners (1st - 4th)")
             st.caption("Ties on GW points are broken by season-to-date cumulative total points.")
