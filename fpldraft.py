@@ -1,3 +1,4 @@
+import json
 import requests
 import pandas as pd
 import numpy as np
@@ -441,39 +442,66 @@ if league_id:
 
         POSITION_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉", 4: "🎖️"}
 
-        ticker_items = []
+        # Build the 3 rotating slides, in order: GW Top 4 -> Current Month MOTM -> Total Cash Won
+        ticker_slides = []
+
         if current_gw_top4:
-            gw_parts = "&nbsp;&nbsp;".join(
+            gw_parts = "&nbsp;&nbsp;&nbsp;".join(
                 f"{POSITION_MEDALS[pos]} <strong>{manager}</strong> ({pts} pts)"
                 for pos, manager, pts in current_gw_top4
             )
-            ticker_items.append(f"🔥 GW{max_played_gw} Top 4:&nbsp;&nbsp;{gw_parts}")
+            ticker_slides.append(f"🔥 GW{max_played_gw} Top 4:&nbsp;&nbsp;&nbsp;{gw_parts}")
+
         if current_month_leader:
             month_label = "Winner" if current_month_complete else "Leader"
-            ticker_items.append(
+            ticker_slides.append(
                 f"👑 {current_month_name} MOTM {month_label}: <strong>{current_month_leader}</strong> ({current_month_points} pts)"
             )
 
-        if ticker_items:
-            ticker_text = "&nbsp;&nbsp;•&nbsp;&nbsp;".join(ticker_items) 
-            ticker_text = f"{ticker_text}&nbsp;&nbsp;•&nbsp;&nbsp;{ticker_text}"  # repeat for seamless loop
-            st.markdown(
+        if not summary_df.empty and "Total Cash (₹)" in summary_df.columns:
+            cash_sorted = summary_df.sort_values(by="Total Cash (₹)", ascending=False)
+            cash_parts = "&nbsp;&nbsp;&nbsp;".join(
+                f"<strong>{manager}</strong> (₹{int(row['Total Cash (₹)'])})"
+                for manager, row in cash_sorted.iterrows()
+            )
+            ticker_slides.append(f"💰 Total Cash Won:&nbsp;&nbsp;&nbsp;{cash_parts}")
+
+        if ticker_slides:
+            slides_json = json.dumps(ticker_slides)
+            components.html(
                 f"""
                 <div style="overflow: hidden; white-space: nowrap; background: linear-gradient(90deg,#37003c,#00ff85);
-                            border-radius: 8px; padding: 10px 0; margin-bottom: 1.25rem;">
-                    <div style="display: inline-block; padding-left: 100%; white-space: nowrap;
-                                animation: ticker-scroll 30s linear infinite; color: #ffffff; font-size: 16px; font-weight: 600;">
-                        {ticker_text}
-                    </div>
+                            border-radius: 8px; padding: 12px 0; box-sizing: border-box; margin: 0;
+                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+                    <div id="ticker-slide" style="display: inline-block; white-space: nowrap; padding-left: 100%;
+                                color: #ffffff; font-size: 16px; font-weight: 600;"></div>
                 </div>
                 <style>
                 @keyframes ticker-scroll {{
                     0%   {{ transform: translateX(0); }}
-                    100% {{ transform: translateX(-50%); }}
+                    100% {{ transform: translateX(-100%); }}
                 }}
                 </style>
+                <script>
+                const tickerSlides = {slides_json};
+                let tickerIdx = 0;
+                const tickerEl = document.getElementById('ticker-slide');
+
+                function showTickerSlide(i) {{
+                    tickerEl.style.animation = 'none';
+                    tickerEl.innerHTML = tickerSlides[i];
+                    void tickerEl.offsetWidth; // force reflow so the animation restarts cleanly
+                    tickerEl.style.animation = 'ticker-scroll 15s linear infinite';
+                }}
+
+                showTickerSlide(tickerIdx);
+                setInterval(() => {{
+                    tickerIdx = (tickerIdx + 1) % tickerSlides.length;
+                    showTickerSlide(tickerIdx);
+                }}, 15000);
+                </script>
                 """,
-                unsafe_allow_html=True,
+                height=54,
             )
 
         # ==========================================
