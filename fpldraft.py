@@ -484,6 +484,7 @@ if league_id:
                 </style>
                 <script>
                 const tickerSlides = {slides_json};
+                const scrollSeconds = 35; // slower, more readable scroll speed
                 let tickerIdx = 0;
                 const tickerEl = document.getElementById('ticker-slide');
 
@@ -491,14 +492,14 @@ if league_id:
                     tickerEl.style.animation = 'none';
                     tickerEl.innerHTML = tickerSlides[i];
                     void tickerEl.offsetWidth; // force reflow so the animation restarts cleanly
-                    tickerEl.style.animation = 'ticker-scroll 15s linear infinite';
+                    tickerEl.style.animation = `ticker-scroll ${{scrollSeconds}}s linear infinite`;
                 }}
 
                 showTickerSlide(tickerIdx);
                 setInterval(() => {{
                     tickerIdx = (tickerIdx + 1) % tickerSlides.length;
                     showTickerSlide(tickerIdx);
-                }}, 15000);
+                }}, scrollSeconds * 1000);
                 </script>
                 """,
                 height=54,
