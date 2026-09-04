@@ -22,8 +22,10 @@ SEASON_2ND_PRIZE = 500
 # on total points for the Monthly Manager (MOTM) award, the tie is broken by
 # whoever has the higher season-to-date cumulative points total (i.e. their
 # running Total through the GW in question / through the last GW of the
-# month). If managers are still tied after applying this tiebreaker, the
-# prize is split equally among the managers still tied.
+# month). There is no prize split: the single manager with the higher
+# cumulative total takes the full prize. In the rare case both points and
+# cumulative total are still tied, a single winner is chosen deterministically
+# (alphabetically) so the prize is never divided.
 
 GW_MONTH_MAPPING = {
     "August": list(range(1, 3)), "September": list(range(3, 6)),
@@ -104,6 +106,43 @@ def _cumulative_points_table(raw_df: pd.DataFrame, max_played_gw: int, managers:
     return pivot.cumsum(axis=1)
 
 
+def _resolve_single_winner(score_series: pd.Series, cum_table: pd.DataFrame, tiebreak_gw):
+    """
+    Given a Series of manager -> points for some period (a GW or a month),
+    resolves a single winner:
+      1. Highest points wins outright.
+      2. Ties are broken by whoever has the higher season-to-date cumulative
+         points total through `tiebreak_gw`.
+      3. If still tied, a single winner is chosen deterministically
+         (alphabetically) so a prize is never split.
+    Returns (winner, winning_points, tie_was_broken). winner is None if the
+    series is empty.
+    """
+    if score_series is None or score_series.empty:
+        return None, None, False
+
+    top_pts = score_series.max()
+    candidates = score_series[score_series == top_pts].index.tolist()
+    tie_broken = False
+
+    if len(candidates) > 1 and tiebreak_gw is not None and tiebreak_gw in cum_table.columns:
+        cum_scores = {
+            w: (cum_table.loc[w, tiebreak_gw] if w in cum_table.index else 0)
+            for w in candidates
+        }
+        top_cum = max(cum_scores.values())
+        narrowed = [w for w, v in cum_scores.items() if v == top_cum]
+        if len(narrowed) < len(candidates):
+            candidates = narrowed
+            tie_broken = True
+
+    if len(candidates) > 1:
+        candidates = [sorted(candidates)[0]]
+        tie_broken = True
+
+    return candidates[0], top_pts, tie_broken
+
+
 # ==========================================
 # DERIVED TABLES (CACHED so widget interactions like the MOTM month
 # selector don't force a full recompute on every Streamlit rerun)
@@ -175,27 +214,10 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
             m_df = raw_df[raw_df["GW"].isin(gws)]
             if not m_df.empty:
                 m_totals = m_df.groupby("Teams")["Points"].sum()
-                top_pts = m_totals.max()
-                month_winners = m_totals[m_totals == top_pts].index.tolist()
-
-                if len(month_winners) > 1:
-                    last_gw = max(gws)
-                    if last_gw in cum_table.columns:
-                        cum_scores = {
-                            w: (cum_table.loc[w, last_gw] if w in cum_table.index else 0)
-                            for w in month_winners
-                        }
-                        top_cum = max(cum_scores.values())
-                        month_winners = [w for w, v in cum_scores.items() if v == top_cum]
-
-                if len(month_winners) > 1:
-                    # Still tied after the cumulative-total tiebreak — pick a
-                    # single deterministic winner rather than splitting the prize.
-                    month_winners = [sorted(month_winners)[0]]
-
-                winner = month_winners[0]
-                motm_wins_count[winner] += 1
-                motm_cash_won[winner] += MOTM_PRIZE
+                winner, _, _ = _resolve_single_winner(m_totals, cum_table, max(gws))
+                if winner is not None:
+                    motm_wins_count[winner] += 1
+                    motm_cash_won[winner] += MOTM_PRIZE
 
     # 4. FINAL STANDINGS CASH
     season_cash_won = {m: 0 for m in all_managers}
@@ -390,6 +412,71 @@ if league_id:
         )
 
         # ==========================================
+        # LIVE TICKER — current GW top 4 + current month leader
+        # ==========================================
+        current_gw_top4 = []  # list of (position, manager, points)
+        if max_played_gw and f"GW{max_played_gw}" in winners_df.columns:
+            gw_col = f"GW{max_played_gw}"
+            for pos in [1, 2, 3, 4]:
+                manager = winners_df.loc[pos, gw_col]
+                if manager:
+                    pts = int(points_pivot.loc[manager, gw_col]) if manager in points_pivot.index else None
+                    current_gw_top4.append((pos, manager, pts))
+
+        current_month_name, current_month_leader, current_month_points, current_month_complete = None, None, None, False
+        if max_played_gw:
+            for month, gws in GW_MONTH_MAPPING.items():
+                if max_played_gw in gws:
+                    current_month_name = month
+                    current_month_complete = all(gw <= max_played_gw for gw in gws)
+                    played_gws_this_month = [gw for gw in gws if gw <= max_played_gw]
+                    m_df_current = raw_df[raw_df["GW"].isin(played_gws_this_month)]
+                    if not m_df_current.empty:
+                        m_totals_current = m_df_current.groupby("Teams")["Points"].sum()
+                        tiebreak_gw_current = max(played_gws_this_month)
+                        winner, pts, _ = _resolve_single_winner(m_totals_current, cum_table, tiebreak_gw_current)
+                        current_month_leader = winner
+                        current_month_points = int(pts) if pts is not None else None
+                    break
+
+        POSITION_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉", 4: "🎖️"}
+
+        ticker_items = []
+        if current_gw_top4:
+            gw_parts = "&nbsp;&nbsp;".join(
+                f"{POSITION_MEDALS[pos]} <strong>{manager}</strong> ({pts} pts)"
+                for pos, manager, pts in current_gw_top4
+            )
+            ticker_items.append(f"🔥 GW{max_played_gw} Top 4:&nbsp;&nbsp;{gw_parts}")
+        if current_month_leader:
+            month_label = "Winner" if current_month_complete else "Leader"
+            ticker_items.append(
+                f"👑 {current_month_name} MOTM {month_label}: <strong>{current_month_leader}</strong> ({current_month_points} pts)"
+            )
+
+        if ticker_items:
+            ticker_text = "&nbsp;&nbsp;•&nbsp;&nbsp;".join(ticker_items) 
+            ticker_text = f"{ticker_text}&nbsp;&nbsp;•&nbsp;&nbsp;{ticker_text}"  # repeat for seamless loop
+            st.markdown(
+                f"""
+                <div style="overflow: hidden; white-space: nowrap; background: linear-gradient(90deg,#37003c,#00ff85);
+                            border-radius: 8px; padding: 10px 0; margin-bottom: 1.25rem;">
+                    <div style="display: inline-block; padding-left: 100%; white-space: nowrap;
+                                animation: ticker-scroll 30s linear infinite; color: #ffffff; font-size: 16px; font-weight: 600;">
+                        {ticker_text}
+                    </div>
+                </div>
+                <style>
+                @keyframes ticker-scroll {{
+                    0%   {{ transform: translateX(0); }}
+                    100% {{ transform: translateX(-50%); }}
+                }}
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # ==========================================
         # DASHBOARD TABS
         # ==========================================
         tab_overview, tab_cash, tab_motm, tab_prob, tab_live = st.tabs([
@@ -456,36 +543,13 @@ if league_id:
                 rename_cols = {gw: f"GW{gw}" for gw in target_gws}
                 motm_pivot = motm_pivot.rename(columns=rename_cols)
 
-                top_score = motm_pivot.iloc[0]["Total Points"]
-                current_leaders = motm_pivot[motm_pivot["Total Points"] == top_score]["Teams"].tolist()
-                tie_broken_by_total = False
-
-                # Apply the season-to-date cumulative-total tiebreak whenever there's
-                # a tie at the top, using the cumulative total through the latest
-                # played GW within this month. This always narrows down to exactly
-                # one manager — no prize splitting.
-                if len(current_leaders) > 1:
-                    played_target_gws = [gw for gw in target_gws if gw <= max_played_gw]
-                    tiebreak_gw = max(played_target_gws) if played_target_gws else None
-                    if tiebreak_gw is not None and tiebreak_gw in cum_table.columns:
-                        cum_scores = {
-                            w: (cum_table.loc[w, tiebreak_gw] if w in cum_table.index else 0)
-                            for w in current_leaders
-                        }
-                        top_cum = max(cum_scores.values())
-                        tiebroken_leaders = [w for w, v in cum_scores.items() if v == top_cum]
-                        if len(tiebroken_leaders) < len(current_leaders):
-                            current_leaders = tiebroken_leaders
-                            tie_broken_by_total = True
-
-                    if len(current_leaders) > 1:
-                        # Still tied after the cumulative-total tiebreak — pick a
-                        # single deterministic winner rather than splitting the prize.
-                        current_leaders = [sorted(current_leaders)[0]]
-                        tie_broken_by_total = True
-
+                m_totals_for_month = motm_filtered.groupby("Teams")["Points"].sum()
+                played_target_gws = [gw for gw in target_gws if gw <= max_played_gw]
+                tiebreak_gw = max(played_target_gws) if played_target_gws else None
+                winner_name, top_score, tie_broken_by_total = _resolve_single_winner(
+                    m_totals_for_month, cum_table, tiebreak_gw
+                )
                 tie_note = " (tie broken by season-to-date total points)" if tie_broken_by_total else ""
-                winner_name = current_leaders[0]
 
                 if is_month_complete:
                     st.success(
