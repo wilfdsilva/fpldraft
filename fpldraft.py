@@ -1,4 +1,7 @@
 import json
+import datetime
+from zoneinfo import ZoneInfo
+
 import requests
 import pandas as pd
 import numpy as np
@@ -18,6 +21,8 @@ MOTM_PRIZE = 200
 SEASON_1ST_PRIZE = 1000
 SEASON_2ND_PRIZE = 500
 
+IST = ZoneInfo("Asia/Kolkata")
+
 # TIEBREAKER RULE:
 # If two or more managers are tied on points for a Gameweek (GW) award, or tied
 # on total points for the Monthly Manager (MOTM) award, the tie is broken by
@@ -35,6 +40,16 @@ GW_MONTH_MAPPING = {
     "February": list(range(24, 28)), "March": list(range(28, 31)),
     "April": list(range(31, 34)), "May": list(range(34, 39))
 }
+
+
+def get_current_motm_month():
+    """Returns the calendar month name (matching GW_MONTH_MAPPING keys) for
+    'today' in IST. Returns None if today's calendar month falls outside the
+    season's mapped months (e.g. June/July off-season)."""
+    now_ist = datetime.datetime.now(IST)
+    month_name = now_ist.strftime("%B")
+    return month_name if month_name in GW_MONTH_MAPPING else None
+
 
 # ==========================================
 # DATA FETCHING (PURE API WITH CONCURRENCY)
@@ -412,6 +427,14 @@ if league_id:
             raw_df, max_played_gw
         )
 
+        # Current calendar month (IST) is used as the default selection for the
+        # Manager of the Month dropdown, in both the Points & Standings tab and
+        # the Win Probabilities tab.
+        current_motm_month = get_current_motm_month()
+        motm_months_list = list(GW_MONTH_MAPPING.keys())
+        default_motm_month = current_motm_month if current_motm_month in motm_months_list else motm_months_list[0]
+        default_motm_index = motm_months_list.index(default_motm_month)
+
         # ==========================================
         # LIVE TICKER — current GW top 4 + current month leader
         # ==========================================
@@ -508,8 +531,8 @@ if league_id:
         # ==========================================
         # DASHBOARD TABS
         # ==========================================
-        tab_overview, tab_cash, tab_motm, tab_prob, tab_live = st.tabs([
-            "📊 Points & Standings", "💰 Podium Counts & Cash Won", "👑 Manager of the Month", "🎲 Win Probabilities (%)", "🔴 Live GW Points"
+        tab_overview, tab_cash, tab_prob, tab_live = st.tabs([
+            "📊 Points & Standings", "💰 Podium Counts & Cash Won", "🎲 Win Probabilities (%)", "🔴 Live GW Points"
         ])
 
         with tab_overview:
@@ -525,28 +548,13 @@ if league_id:
             st.caption("Ties on GW points are broken by season-to-date cumulative total points.")
             st.dataframe(winners_df, use_container_width=True)
 
-        with tab_cash:
-            col_left, col_right = st.columns([2, 1])
-            with col_left:
-                st.subheader("🎖️ Podium Counts & Total Cash Won")
-                if not summary_df.empty:
-                    st.dataframe(summary_df.sort_values(by="Total Cash (₹)", ascending=False), use_container_width=True)
-            with col_right:
-                st.subheader("💵 Prize Rules")
-                prize_rule_df = pd.DataFrame({
-                    "Award Category": ["Weekly 1st", "Weekly 2nd", "Weekly 3rd", "Weekly 4th", "MOTM (Complete)", "1st Overall", "2nd Overall"],
-                    "Cash": [f"₹{WEEKLY_PRIZE_MAP[1]}", f"₹{WEEKLY_PRIZE_MAP[2]}", f"₹{WEEKLY_PRIZE_MAP[3]}", f"₹{WEEKLY_PRIZE_MAP[4]}", f"₹{MOTM_PRIZE}", f"₹{SEASON_1ST_PRIZE}", f"₹{SEASON_2ND_PRIZE}"]
-                })
-                st.dataframe(prize_rule_df, use_container_width=True, hide_index=True)
-                st.caption("Ties (GW or MOTM) are broken by higher season-to-date cumulative points.")
-
             st.markdown("---")
-            st.subheader("💳 Weekly Cash Won per Gameweek (₹)")
-            st.dataframe(_blank_nulls(cash_matrix), use_container_width=True)
-
-        with tab_motm:
             st.subheader("👑 Manager of the Month Standings")
-            selected_month = st.selectbox("Select Calendar Month", list(GW_MONTH_MAPPING.keys()), key="motm_month_selectbox")
+            selected_month = st.selectbox(
+                "Select Calendar Month", motm_months_list, index=default_motm_index, key="motm_month_selectbox"
+            )
+            if selected_month == current_motm_month:
+                st.caption(f"{selected_month} is the current month (IST).")
             target_gws = GW_MONTH_MAPPING[selected_month]
 
             is_month_complete = all(gw <= max_played_gw for gw in target_gws)
@@ -591,6 +599,25 @@ if league_id:
                 st.dataframe(_blank_nulls(motm_pivot), use_container_width=True)
             else:
                 st.info(f"No Gameweek points finalized yet for {selected_month} (GWs: {target_gws}).")
+
+        with tab_cash:
+            col_left, col_right = st.columns([2, 1])
+            with col_left:
+                st.subheader("🎖️ Podium Counts & Total Cash Won")
+                if not summary_df.empty:
+                    st.dataframe(summary_df.sort_values(by="Total Cash (₹)", ascending=False), use_container_width=True)
+            with col_right:
+                st.subheader("💵 Prize Rules")
+                prize_rule_df = pd.DataFrame({
+                    "Award Category": ["Weekly 1st", "Weekly 2nd", "Weekly 3rd", "Weekly 4th", "MOTM (Complete)", "1st Overall", "2nd Overall"],
+                    "Cash": [f"₹{WEEKLY_PRIZE_MAP[1]}", f"₹{WEEKLY_PRIZE_MAP[2]}", f"₹{WEEKLY_PRIZE_MAP[3]}", f"₹{WEEKLY_PRIZE_MAP[4]}", f"₹{MOTM_PRIZE}", f"₹{SEASON_1ST_PRIZE}", f"₹{SEASON_2ND_PRIZE}"]
+                })
+                st.dataframe(prize_rule_df, use_container_width=True, hide_index=True)
+                st.caption("Ties (GW or MOTM) are broken by higher season-to-date cumulative points.")
+
+            st.markdown("---")
+            st.subheader("💳 Weekly Cash Won per Gameweek (₹)")
+            st.dataframe(_blank_nulls(cash_matrix), use_container_width=True)
 
         with tab_prob:
             st.header("🎲 Monte Carlo Win Probability Projections")
