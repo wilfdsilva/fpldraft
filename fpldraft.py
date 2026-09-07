@@ -225,8 +225,16 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
     # awarded the full prize.
     motm_wins_count = {m: 0 for m in all_managers}
     motm_cash_won = {m: 0 for m in all_managers}
+    all_month_names = list(GW_MONTH_MAPPING.keys())
+    # Monthly Cash Won matrix: rows = managers, columns = calendar months.
+    # A cell stays blank (<NA>) until that month's GWs are all played; once the
+    # month is complete every manager's cell defaults to 0 except the MOTM
+    # winner's, which gets the full MOTM_PRIZE (ties resolved the same way as
+    # the aggregate MOTM cash above).
+    monthly_cash_matrix = pd.DataFrame(pd.NA, index=all_managers, columns=all_month_names, dtype="Int64")
     for month, gws in GW_MONTH_MAPPING.items():
         if all(gw <= max_played_gw for gw in gws):
+            monthly_cash_matrix[month] = 0
             m_df = raw_df[raw_df["GW"].isin(gws)]
             if not m_df.empty:
                 m_totals = m_df.groupby("Teams")["Points"].sum()
@@ -234,6 +242,7 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
                 if winner is not None:
                     motm_wins_count[winner] += 1
                     motm_cash_won[winner] += MOTM_PRIZE
+                    monthly_cash_matrix.loc[winner, month] = MOTM_PRIZE
 
     # 4. FINAL STANDINGS CASH
     season_cash_won = {m: 0 for m in all_managers}
@@ -282,7 +291,12 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
     else:
         summary_df = pd.DataFrame()
 
-    return points_pivot, winners_df, summary_df, cash_matrix, all_managers, played_gw_cols, cum_table
+    completed_months = [m for m in all_month_names if monthly_cash_matrix[m].notna().any()]
+    monthly_cash_matrix["Total MOTM Cash"] = (
+        monthly_cash_matrix[completed_months].sum(axis=1, skipna=True).astype("Int64") if completed_months else pd.array([0] * len(all_managers), dtype="Int64")
+    )
+
+    return points_pivot, winners_df, summary_df, cash_matrix, monthly_cash_matrix, all_managers, played_gw_cols, cum_table
 
 
 def _blank_nulls(df: pd.DataFrame) -> pd.DataFrame:
@@ -423,7 +437,7 @@ if league_id:
 
         max_played_gw = int(raw_df["GW"].max()) if not raw_df.empty else 0
 
-        points_pivot, winners_df, summary_df, cash_matrix, all_managers, played_gw_cols, cum_table = build_dashboard_tables(
+        points_pivot, winners_df, summary_df, cash_matrix, monthly_cash_matrix, all_managers, played_gw_cols, cum_table = build_dashboard_tables(
             raw_df, max_played_gw
         )
 
@@ -618,6 +632,11 @@ if league_id:
             st.markdown("---")
             st.subheader("💳 Weekly Cash Won per Gameweek (₹)")
             st.dataframe(_blank_nulls(cash_matrix), use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("📅 Monthly Cash Won per Month (₹)")
+            st.caption("Blank = month not yet complete, so MOTM cash hasn't been awarded. Ties are broken by higher season-to-date cumulative points.")
+            st.dataframe(_blank_nulls(monthly_cash_matrix), use_container_width=True)
 
         with tab_prob:
             st.header("🎲 Monte Carlo Win Probability Projections")
