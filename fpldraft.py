@@ -575,7 +575,7 @@ if league_id:
 
         with tab_overview:
             st.subheader("📋 Points Matrix (GW1 - GW38)")
-            st.caption(f"Sorted by GW{max_played_gw} points (latest Gameweek), highest to lowest." if max_played_gw else "")
+            st.caption(f"Sorted by GW{max_played_gw} points (latest Gameweek), highest to lowest. Color codes indicate 1st - Gold, 2nd - Silver, 3rd - Bronze, and 4th - Blue." if max_played_gw else "")
             
             if max_played_gw and f"GW{max_played_gw}" in points_pivot.columns:
                 points_pivot_display = points_pivot.sort_values(by=f"GW{max_played_gw}", ascending=False, na_position="last")
