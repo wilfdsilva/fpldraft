@@ -304,6 +304,30 @@ def _blank_nulls(df: pd.DataFrame) -> pd.DataFrame:
     return df.astype(object).where(df.notna(), "")
 
 
+def highlight_podium(df, winners):
+    """Applies CSS background colors to 1st, 2nd, 3rd, and 4th place cells."""
+    # Create an empty DataFrame of styles with the same shape/index as the target
+    styles = pd.DataFrame('', index=df.index, columns=df.columns)
+    
+    # Define exact hex colors requested (with text color for readability)
+    colors = {
+        1: "background-color: #FFD700; color: black;",  # Gold
+        2: "background-color: #C0C0C0; color: black;",  # Silver
+        3: "background-color: #CD7F32; color: black;",  # Bronze
+        4: "background-color: #4472C4; color: white;"   # Blue
+    }
+    
+    for col in df.columns:
+        if col.startswith("GW") and col in winners.columns:
+            for pos in [1, 2, 3, 4]:
+                if pos in winners.index:
+                    manager = winners.loc[pos, col]
+                    if manager and manager in styles.index:
+                        styles.loc[manager, col] = colors[pos]
+                        
+    return styles
+
+
 # ==========================================
 # MONTE CARLO PROJECTION FUNCTIONS (VECTORIZED)
 # ==========================================
@@ -552,11 +576,21 @@ if league_id:
         with tab_overview:
             st.subheader("📋 Points Matrix (GW1 - GW38)")
             st.caption(f"Sorted by GW{max_played_gw} points (latest Gameweek), highest to lowest." if max_played_gw else "")
+            
             if max_played_gw and f"GW{max_played_gw}" in points_pivot.columns:
                 points_pivot_display = points_pivot.sort_values(by=f"GW{max_played_gw}", ascending=False, na_position="last")
             else:
                 points_pivot_display = points_pivot
-            st.dataframe(_blank_nulls(points_pivot_display), use_container_width=True)
+                
+            # Clean nulls first, then apply the highlighting style
+            display_df = _blank_nulls(points_pivot_display)
+            styled_points = display_df.style.apply(
+                highlight_podium, 
+                winners=winners_df, 
+                axis=None
+            )
+            
+            st.dataframe(styled_points, use_container_width=True)
 
             st.subheader("🏆 Weekly Podium Winners (1st - 4th)")
             st.caption("Ties on GW points are broken by season-to-date cumulative total points.")
