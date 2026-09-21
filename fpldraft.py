@@ -274,10 +274,10 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
 
         summary_data.append({
             "Teams": manager,
-            "1st (GW)": counts[1],
-            "2nd (GW)": counts[2],
-            "3rd (GW)": counts[3],
-            "4th (GW)": counts[4],
+            "1st": counts[1],
+            "2nd": counts[2],
+            "3rd": counts[3],
+            "4th": counts[4],
             "MOTM Wins": motm_wins_count[manager],
             "Weekly Cash (₹)": int(weekly_amount),
             "MOTM Cash (₹)": int(motm_amount),
