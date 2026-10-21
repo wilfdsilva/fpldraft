@@ -83,7 +83,8 @@ def load_league_data(league_id: str):
                             "Teams": manager_name,
                             "Team Name": team_name,
                             "GW": gw["event"],
-                            "Points": gw["points"]
+                            "Points": gw["points"],
+                            "Total Points": gw.get("total_points", 0) # Fetch directly from API if available
                         })
                 return records
 
@@ -114,6 +115,16 @@ def _cumulative_points_table(raw_df: pd.DataFrame, max_played_gw: int, managers:
     if not managers or max_played_gw <= 0:
         return pd.DataFrame(index=managers, columns=range(1, max(max_played_gw, 0) + 1)).fillna(0).astype(int)
 
+    # Use the API's actual "Total Points" if available to map exact season total to date
+    if "Total Points" in raw_df.columns:
+        pivot = (
+            raw_df.pivot(index="Teams", columns="GW", values="Total Points")
+            .reindex(index=managers, columns=range(1, max_played_gw + 1))
+            .ffill(axis=1) # Forward fill missing GWs with previous totals
+            .fillna(0)
+        )
+        return pivot
+        
     pivot = (
         raw_df.pivot(index="Teams", columns="GW", values="Points")
         .reindex(index=managers, columns=range(1, max_played_gw + 1))
@@ -197,9 +208,11 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
 
     # 2. WEEKLY PODIUM WINNERS
     # Ties on Points for a Gameweek are broken by season-to-date cumulative
-    # total through that Gameweek (higher cumulative total wins the tie).
+    # total through that Gameweek (higher cumulative total wins the tie). 
+    # If still tied, it sorts Alphabetically so a single manager always wins.
     winners_dict = {pos: {f"GW{gw}": "" for gw in range(1, 39)} for pos in range(1, 5)}
     played_df = raw_df[raw_df["GW"] <= max_played_gw] if max_played_gw else raw_df.iloc[0:0]
+    
     if not played_df.empty:
         for gw in sorted(played_df["GW"].unique()):
             gw_df = played_df[played_df["GW"] == gw].copy()
@@ -207,8 +220,9 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
                 gw_df["CumTotal"] = gw_df["Teams"].map(cum_table[gw]).fillna(0)
             else:
                 gw_df["CumTotal"] = 0
-            # Sort by GW Points desc, then season-to-date cumulative total desc (tiebreak)
-            gw_df = gw_df.sort_values(by=["Points", "CumTotal"], ascending=[False, False])
+                
+            # Sort by: 1) GW Points desc, 2) CumTotal points desc (Tiebreak), 3) Teams asc (Alphabetical Tiebreak)
+            gw_df = gw_df.sort_values(by=["Points", "CumTotal", "Teams"], ascending=[False, False, True])
             top4 = gw_df.head(4)
             for pos, team in enumerate(top4["Teams"].tolist(), start=1):
                 winners_dict[pos][f"GW{int(gw)}"] = team
@@ -217,20 +231,10 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
     winners_df.index.name = "Winners"
 
     # 3. MOTM CASH CALCULATION (rounded to whole rupees, no decimals)
-    # Ties on total Points for the month are broken by season-to-date cumulative
-    # total through the last GW of that month — the single manager with the
-    # higher cumulative total takes the full MOTM prize. No equal split: if a
-    # tie somehow survives the cumulative-total tiebreak too, it is broken
-    # deterministically (alphabetically) so exactly one manager is always
-    # awarded the full prize.
     motm_wins_count = {m: 0 for m in all_managers}
     motm_cash_won = {m: 0 for m in all_managers}
     all_month_names = list(GW_MONTH_MAPPING.keys())
-    # Monthly Cash Won matrix: rows = managers, columns = calendar months.
-    # A cell stays blank (<NA>) until that month's GWs are all played; once the
-    # month is complete every manager's cell defaults to 0 except the MOTM
-    # winner's, which gets the full MOTM_PRIZE (ties resolved the same way as
-    # the aggregate MOTM cash above).
+    
     monthly_cash_matrix = pd.DataFrame(pd.NA, index=all_managers, columns=all_month_names, dtype="Int64")
     for month, gws in GW_MONTH_MAPPING.items():
         if all(gw <= max_played_gw for gw in gws):
@@ -253,7 +257,7 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
         if len(final_ranks) >= 2:
             season_cash_won[final_ranks[1]] += SEASON_2ND_PRIZE
 
-    # 5. SUMMARY & CASH MATRIX — nullable Int64 so unplayed GWs stay blank, not "None"
+    # 5. SUMMARY & CASH MATRIX
     summary_data = []
     cash_matrix = pd.DataFrame(pd.NA, index=all_managers, columns=all_gw_cols, dtype="Int64")
 
@@ -465,9 +469,6 @@ if league_id:
             raw_df, max_played_gw
         )
 
-        # Current calendar month (IST) is used as the default selection for the
-        # Manager of the Month dropdown, in both the Points & Standings tab and
-        # the Win Probabilities tab.
         current_motm_month = get_current_motm_month()
         motm_months_list = list(GW_MONTH_MAPPING.keys())
         default_motm_month = current_motm_month if current_motm_month in motm_months_list else motm_months_list[0]
@@ -503,7 +504,6 @@ if league_id:
 
         POSITION_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉", 4: "🎖️"}
 
-        # Build the 3 rotating slides, in order: GW Top 4 -> Current Month MOTM -> Total Cash Won
         ticker_slides = []
 
         if current_gw_top4:
