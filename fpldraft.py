@@ -598,4 +598,104 @@ if league_id:
 
             is_month_complete = all(gw <= max_played_gw for gw in target_gws)
             if is_month_complete:
-                st.write("✅
+                st.write("✅ **Month Completed (Prize Awarded)**")
+            else:
+                st.write(f"⏳ **In Progress / Upcoming** (Gameweeks: {target_gws})")
+
+            motm_filtered = raw_df[raw_df["GW"].isin(target_gws)]
+            if not motm_filtered.empty:
+                motm_pivot = motm_filtered.pivot(index="Teams", columns="GW", values="Points")
+
+                for gw in target_gws:
+                    if gw not in motm_pivot.columns:
+                        motm_pivot[gw] = np.nan
+
+                motm_pivot = motm_pivot[target_gws].astype("Int64")
+                motm_pivot["Total Points"] = motm_pivot.sum(axis=1, skipna=True).astype("Int64")
+
+                motm_pivot = motm_pivot.sort_values(by="Total Points", ascending=False).reset_index()
+                motm_pivot.index += 1
+
+                rename_cols = {gw: f"GW{gw}" for gw in target_gws}
+                motm_pivot = motm_pivot.rename(columns=rename_cols)
+
+                m_totals_for_month = motm_filtered.groupby("Teams")["Points"].sum()
+                played_target_gws = [gw for gw in target_gws if gw <= max_played_gw]
+                tiebreak_gw = max(played_target_gws) if played_target_gws else None
+                winner_name, top_score, tie_broken_by_total = _resolve_single_winner(
+                    m_totals_for_month, cum_table, tiebreak_gw
+                )
+                tie_note = " (tie broken by season-to-date total points)" if tie_broken_by_total else ""
+
+                if is_month_complete:
+                    st.success(
+                        f"🎉 Official MOTM Winner: {winner_name} with {int(top_score)} pts "
+                        f"(Won ₹{MOTM_PRIZE}){tie_note}!"
+                    )
+                else:
+                    st.info(f"Leader so far: {winner_name} ({int(top_score)} pts){tie_note}. Cash will be awarded after all GWs finish.")
+
+                st.dataframe(_blank_nulls(motm_pivot), use_container_width=True)
+            else:
+                st.info(f"No Gameweek points finalized yet for {selected_month} (GWs: {target_gws}).")
+
+        with tab_cash:
+            col_left, col_right = st.columns([2, 1])
+            with col_left:
+                st.subheader("🎖️ Podium Counts & Total Cash Won")
+                if not summary_df.empty:
+                    st.dataframe(summary_df.sort_values(by="Total Cash (₹)", ascending=False), use_container_width=True)
+            with col_right:
+                st.subheader("💵 Prize Rules")
+                prize_rule_df = pd.DataFrame({
+                    "Award Category": ["Weekly 1st", "Weekly 2nd", "Weekly 3rd", "Weekly 4th", "MOTM (Complete)", "1st Overall", "2nd Overall"],
+                    "Cash": [f"₹{WEEKLY_PRIZE_MAP[1]}", f"₹{WEEKLY_PRIZE_MAP[2]}", f"₹{WEEKLY_PRIZE_MAP[3]}", f"₹{WEEKLY_PRIZE_MAP[4]}", f"₹{MOTM_PRIZE}", f"₹{SEASON_1ST_PRIZE}", f"₹{SEASON_2ND_PRIZE}"]
+                })
+                st.dataframe(prize_rule_df, use_container_width=True, hide_index=True)
+                st.caption("Ties (GW or MOTM) are broken by higher season-to-date cumulative points.")
+
+            st.markdown("---")
+            st.subheader("💳 Weekly Cash Won per Gameweek (₹)")
+            st.dataframe(_blank_nulls(cash_matrix), use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("📅 Monthly Cash Won per Month (₹)")
+            st.caption("Blank = month not yet complete, so MOTM cash hasn't been awarded. Ties are broken by higher season-to-date cumulative points.")
+            st.dataframe(_blank_nulls(monthly_cash_matrix), use_container_width=True)
+
+        with tab_prob:
+            st.header("🎲 Monte Carlo Win Probability Projections")
+            st.caption("Projections based on 5,000 simulations using each manager's historical scoring rate and variance.")
+            if all_managers:
+                col_seas, col_month = st.columns(2)
+                with col_seas:
+                    st.subheader("🏆 End-of-Season Probability (GW38)")
+                    season_probs = run_monte_carlo_season_projections(raw_df, tuple(all_managers), max_played_gw)
+                    season_prob_df = pd.DataFrame([{"Teams": m, "Current Pts": int(points_pivot.loc[m, "Total"]) if "Total" in points_pivot.columns else 0, "1st Place (%)": f"{season_probs.get(m, (0, 0))[0]}%", "2nd Place (%)": f"{season_probs.get(m, (0, 0))[1]}%"} for m in all_managers]).sort_values(by="Current Pts", ascending=False).reset_index(drop=True)
+                    st.dataframe(season_prob_df, use_container_width=True, hide_index=True)
+                with col_month:
+                    st.subheader(f"👑 MOTM Probability: {selected_month}")
+                    motm_probs = run_monte_carlo_motm_projections(raw_df, tuple(all_managers), tuple(target_gws), max_played_gw)
+                    motm_prob_df = pd.DataFrame([{"Teams": m, "Win MOTM Prob (%)": f"{motm_probs.get(m, 0)}%"} for m in all_managers]).sort_values(by="Win MOTM Prob (%)", ascending=False).reset_index(drop=True)
+                    st.dataframe(motm_prob_df, use_container_width=True, hide_index=True)
+
+        with tab_live:
+            st.subheader("🔴 Live Gameweek Points Tracker")
+            st.markdown("Monitor live points. *(If the embed fails, [click here to open the tracker](https://www.anewpla.net/fpl/live/))*")
+
+            components.html(
+                """
+                <iframe 
+                    src="https://www.anewpla.net/fpl/live/" 
+                    width="100%" 
+                    height="800px" 
+                    style="border:none;" 
+                    loading="lazy" 
+                    title="Live FPL Gameweek Points Tracker">
+                </iframe>
+                """,
+                height=800,
+                scrolling=True
+            )
+else:
+    st.info("👈 Please enter your Draft League ID in the sidebar to load the dashboard.")
