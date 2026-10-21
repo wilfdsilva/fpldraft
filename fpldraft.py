@@ -199,11 +199,11 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
 
     # 2. WEEKLY PODIUM WINNERS
     # Ties on Points for a Gameweek are broken by season-to-date cumulative
-    # total through that Gameweek (higher cumulative total wins the tie). 
+    # total through that Gameweek (higher cumulative total wins the tie).
     # If still tied, it sorts Alphabetically so a single manager always wins.
     winners_dict = {pos: {f"GW{gw}": "" for gw in range(1, 39)} for pos in range(1, 5)}
     played_df = raw_df[raw_df["GW"] <= max_played_gw] if max_played_gw else raw_df.iloc[0:0]
-    
+
     if not played_df.empty:
         for gw in sorted(played_df["GW"].unique()):
             gw_df = played_df[played_df["GW"] == gw].copy()
@@ -211,7 +211,7 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
                 gw_df["CumTotal"] = gw_df["Teams"].map(cum_table[gw]).fillna(0)
             else:
                 gw_df["CumTotal"] = 0
-                
+
             # Sort by: 1) GW Points desc, 2) CumTotal points desc (Tiebreak), 3) Teams asc (Alphabetical Tiebreak)
             gw_df = gw_df.sort_values(by=["Points", "CumTotal", "Teams"], ascending=[False, False, True])
             top4 = gw_df.head(4)
@@ -225,7 +225,7 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
     motm_wins_count = {m: 0 for m in all_managers}
     motm_cash_won = {m: 0 for m in all_managers}
     all_month_names = list(GW_MONTH_MAPPING.keys())
-    
+
     monthly_cash_matrix = pd.DataFrame(pd.NA, index=all_managers, columns=all_month_names, dtype="Int64")
     for month, gws in GW_MONTH_MAPPING.items():
         if all(gw <= max_played_gw for gw in gws):
@@ -303,7 +303,7 @@ def highlight_podium(df, winners):
     """Applies CSS background colors to 1st, 2nd, 3rd, and 4th place cells."""
     # Create an empty DataFrame of styles with the same shape/index as the target
     styles = pd.DataFrame('', index=df.index, columns=df.columns)
-    
+
     # Define exact hex colors requested (with text color for readability)
     colors = {
         1: "background-color: #FFD700; color: black;",  # Gold
@@ -311,7 +311,7 @@ def highlight_podium(df, winners):
         3: "background-color: #CD7F32; color: black;",  # Bronze
         4: "background-color: #4472C4; color: white;"   # Blue
     }
-    
+
     for col in df.columns:
         if col.startswith("GW") and col in winners.columns:
             for pos in [1, 2, 3, 4]:
@@ -319,7 +319,7 @@ def highlight_podium(df, winners):
                     manager = winners.loc[pos, col]
                     if manager and manager in styles.index:
                         styles.loc[manager, col] = colors[pos]
-                        
+
     return styles
 
 
@@ -566,21 +566,40 @@ if league_id:
 
         with tab_overview:
             st.subheader("📋 Points Matrix (GW1 - GW38)")
-            st.caption(f"Sorted by GW{max_played_gw} points (latest Gameweek), highest to lowest. Color codes indicate 1st - Gold, 2nd - Silver, 3rd - Bronze, and 4th - Blue." if max_played_gw else "")
-            
+            st.caption(
+                f"Sorted by GW{max_played_gw} points (latest Gameweek), highest to lowest; ties are broken by "
+                f"season-to-date total points, then alphabetically. Color codes indicate 1st - Gold, "
+                f"2nd - Silver, 3rd - Bronze, and 4th - Blue."
+                if max_played_gw else ""
+            )
+
             if max_played_gw and f"GW{max_played_gw}" in points_pivot.columns:
-                points_pivot_display = points_pivot.sort_values(by=f"GW{max_played_gw}", ascending=False, na_position="last")
+                # Sort by: 1) latest GW points desc, 2) season-to-date cumulative total desc (tiebreak),
+                # 3) manager name asc. This mirrors the podium-winner logic so the row order
+                # always matches the gold/silver/bronze/blue colouring.
+                gw_col_name = f"GW{max_played_gw}"
+                sort_df = pd.DataFrame({
+                    "gw": points_pivot[gw_col_name].astype(float),
+                    "cum": cum_table[max_played_gw].reindex(points_pivot.index).fillna(0),
+                    "name": points_pivot.index,
+                })
+                sorted_order = sort_df.sort_values(
+                    by=["gw", "cum", "name"],
+                    ascending=[False, False, True],
+                    na_position="last",
+                ).index
+                points_pivot_display = points_pivot.loc[sorted_order]
             else:
                 points_pivot_display = points_pivot
-                
+
             # Clean nulls first, then apply the highlighting style
             display_df = _blank_nulls(points_pivot_display)
             styled_points = display_df.style.apply(
-                highlight_podium, 
-                winners=winners_df, 
+                highlight_podium,
+                winners=winners_df,
                 axis=None
             )
-            
+
             st.dataframe(styled_points, use_container_width=True)
 
             st.subheader("🏆 Weekly Podium Winners (1st - 4th)")
@@ -685,12 +704,12 @@ if league_id:
 
             components.html(
                 """
-                <iframe 
-                    src="https://www.anewpla.net/fpl/live/" 
-                    width="100%" 
-                    height="800px" 
-                    style="border:none;" 
-                    loading="lazy" 
+                <iframe
+                    src="https://www.anewpla.net/fpl/live/"
+                    width="100%"
+                    height="800px"
+                    style="border:none;"
+                    loading="lazy"
                     title="Live FPL Gameweek Points Tracker">
                 </iframe>
                 """,
