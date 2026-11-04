@@ -3,6 +3,8 @@ import datetime
 from zoneinfo import ZoneInfo
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -14,6 +16,10 @@ st.set_page_config(page_title="FPL Draft Rewards Dashboard", page_icon="⚽", la
 
 LEAGUE_DETAILS_URL = "https://draft.premierleague.com/api/league/{}/details"
 ENTRY_HISTORY_URL = "https://draft.premierleague.com/api/entry/{}/history"
+
+# Network settings: a timeout on every request so the app can never hang forever
+HEADERS = {"User-Agent": "Mozilla/5.0 (FPL Draft Dashboard)"}
+TIMEOUT = 10  # seconds per request
 
 # Prize distribution structure
 WEEKLY_PRIZE_MAP = {1: 200, 2: 150, 3: 100, 4: 50}
@@ -52,54 +58,79 @@ def get_current_motm_month():
 
 
 # ==========================================
-# DATA FETCHING (PURE API WITH CONCURRENCY)
+# DATA FETCHING (PURE API WITH CONCURRENCY, TIMEOUTS & RETRIES)
 # ==========================================
-@st.cache_data(ttl=3600)
-def load_league_data(league_id: str):
-    """Fetches league managers and full Gameweek history concurrently from FPL API."""
+def _make_session() -> requests.Session:
+    """Session with retry/backoff for transient failures and a browser-like UA."""
+    s = requests.Session()
+    retry = Retry(
+        total=3,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    s.headers.update(HEADERS)
+    return s
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_league_df(league_id: str) -> pd.DataFrame:
+    """Fetches league managers and full Gameweek history concurrently.
+    Raises on any failure, so failures are NOT cached by st.cache_data."""
+    session = _make_session()
     try:
-        with requests.Session() as session:
-            res = session.get(LEAGUE_DETAILS_URL.format(league_id))
-            if res.status_code != 200:
-                return None, f"Failed to retrieve league details (Status code: {res.status_code})"
+        res = session.get(LEAGUE_DETAILS_URL.format(league_id), timeout=TIMEOUT)
+        res.raise_for_status()
+        league_data = res.json()
+        entries = league_data.get("league_entries", [])
+        if not entries:
+            raise ValueError("No teams found in this league.")
 
-            league_data = res.json()
-            entries = league_data.get("league_entries", [])
-            if not entries:
-                return None, "No teams found in this league."
+        def fetch_entry(entry):
+            entry_id = entry["entry_id"]
+            manager_name = entry["player_first_name"]
+            team_name = entry["entry_name"]
 
-            def fetch_entry(entry):
-                entry_id = entry["entry_id"]
-                manager_name = entry["player_first_name"]
-                team_name = entry["entry_name"]
+            r = session.get(ENTRY_HISTORY_URL.format(entry_id), timeout=TIMEOUT)
+            r.raise_for_status()
+            history = r.json().get("history", [])
+            return [
+                {
+                    "entry_id": entry_id,
+                    "Teams": manager_name,
+                    "Team Name": team_name,
+                    "GW": gw["event"],
+                    "Points": gw["points"],
+                }
+                for gw in history
+            ]
 
-                records = []
-                hist_res = session.get(ENTRY_HISTORY_URL.format(entry_id))
-                if hist_res.status_code == 200:
-                    history = hist_res.json().get("history", [])
-                    for gw in history:
-                        records.append({
-                            "entry_id": entry_id,
-                            "Teams": manager_name,
-                            "Team Name": team_name,
-                            "GW": gw["event"],
-                            "Points": gw["points"]
-                        })
-                return records
+        all_records = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, max(1, len(entries)))) as executor:
+            for result in executor.map(fetch_entry, entries):
+                all_records.extend(result)
+    finally:
+        session.close()
 
-            all_records = []
-            # Reused session gives connection-pooling/keep-alive benefits across threads
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, max(1, len(entries)))) as executor:
-                for result in executor.map(fetch_entry, entries):
-                    all_records.extend(result)
+    if not all_records:
+        raise ValueError("No history records retrieved.")
+    return pd.DataFrame(all_records)
 
-        if not all_records:
-            return None, "No history records retrieved."
 
-        df = pd.DataFrame(all_records)
-        return df, None
+def load_league_data(league_id: str):
+    """Thin wrapper that converts exceptions into (None, error_message)."""
+    try:
+        return _fetch_league_df(league_id), None
+    except requests.exceptions.Timeout:
+        return None, "The FPL Draft API timed out. It may be busy or updating; try 'Force Sync' in a minute."
+    except requests.exceptions.HTTPError as e:
+        code = e.response.status_code if e.response is not None else "unknown"
+        return None, f"FPL Draft API returned an error (status {code})."
     except Exception as e:
-        return None, str(e)
+        return None, f"Could not load FPL data: {e}"
 
 
 # ==========================================
@@ -447,6 +478,7 @@ if league_id:
 
     if error:
         st.error(error)
+        st.caption("Failed fetches are not cached, so refreshing the page or pressing 'Force Sync' will retry.")
     elif raw_df is not None and not raw_df.empty:
 
         # Only consider GWs where at least someone actually scored
