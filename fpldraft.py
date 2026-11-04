@@ -3,11 +3,10 @@ import datetime
 from zoneinfo import ZoneInfo
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 import pandas as pd
 import numpy as np
 import streamlit as st
+import streamlit.components.v1 as components
 import concurrent.futures
 
 # --- Page Configuration ---
@@ -15,11 +14,6 @@ st.set_page_config(page_title="FPL Draft Rewards Dashboard", page_icon="⚽", la
 
 LEAGUE_DETAILS_URL = "https://draft.premierleague.com/api/league/{}/details"
 ENTRY_HISTORY_URL = "https://draft.premierleague.com/api/entry/{}/history"
-LIVE_TRACKER_URL = "https://www.anewpla.net/fpl/live/"
-
-# Network settings: a timeout on every request so the app can never hang forever
-HEADERS = {"User-Agent": "Mozilla/5.0 (FPL Draft Dashboard)"}
-TIMEOUT = 10  # seconds per request
 
 # Prize distribution structure
 WEEKLY_PRIZE_MAP = {1: 200, 2: 150, 3: 100, 4: 50}
@@ -58,79 +52,54 @@ def get_current_motm_month():
 
 
 # ==========================================
-# DATA FETCHING (PURE API WITH CONCURRENCY, TIMEOUTS & RETRIES)
+# DATA FETCHING (PURE API WITH CONCURRENCY)
 # ==========================================
-def _make_session() -> requests.Session:
-    """Session with retry/backoff for transient failures and a browser-like UA."""
-    s = requests.Session()
-    retry = Retry(
-        total=3,
-        backoff_factor=0.5,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-    )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
-    s.mount("https://", adapter)
-    s.mount("http://", adapter)
-    s.headers.update(HEADERS)
-    return s
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _fetch_league_df(league_id: str) -> pd.DataFrame:
-    """Fetches league managers and full Gameweek history concurrently.
-    Raises on any failure, so failures are NOT cached by st.cache_data."""
-    session = _make_session()
-    try:
-        res = session.get(LEAGUE_DETAILS_URL.format(league_id), timeout=TIMEOUT)
-        res.raise_for_status()
-        league_data = res.json()
-        entries = league_data.get("league_entries", [])
-        if not entries:
-            raise ValueError("No teams found in this league.")
-
-        def fetch_entry(entry):
-            entry_id = entry["entry_id"]
-            manager_name = entry["player_first_name"]
-            team_name = entry["entry_name"]
-
-            r = session.get(ENTRY_HISTORY_URL.format(entry_id), timeout=TIMEOUT)
-            r.raise_for_status()
-            history = r.json().get("history", [])
-            return [
-                {
-                    "entry_id": entry_id,
-                    "Teams": manager_name,
-                    "Team Name": team_name,
-                    "GW": gw["event"],
-                    "Points": gw["points"],
-                }
-                for gw in history
-            ]
-
-        all_records = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, max(1, len(entries)))) as executor:
-            for result in executor.map(fetch_entry, entries):
-                all_records.extend(result)
-    finally:
-        session.close()
-
-    if not all_records:
-        raise ValueError("No history records retrieved.")
-    return pd.DataFrame(all_records)
-
-
+@st.cache_data(ttl=3600)
 def load_league_data(league_id: str):
-    """Thin wrapper that converts exceptions into (None, error_message)."""
+    """Fetches league managers and full Gameweek history concurrently from FPL API."""
     try:
-        return _fetch_league_df(league_id), None
-    except requests.exceptions.Timeout:
-        return None, "The FPL Draft API timed out. It may be busy or updating; try 'Force Sync' in a minute."
-    except requests.exceptions.HTTPError as e:
-        code = e.response.status_code if e.response is not None else "unknown"
-        return None, f"FPL Draft API returned an error (status {code})."
+        with requests.Session() as session:
+            res = session.get(LEAGUE_DETAILS_URL.format(league_id))
+            if res.status_code != 200:
+                return None, f"Failed to retrieve league details (Status code: {res.status_code})"
+
+            league_data = res.json()
+            entries = league_data.get("league_entries", [])
+            if not entries:
+                return None, "No teams found in this league."
+
+            def fetch_entry(entry):
+                entry_id = entry["entry_id"]
+                manager_name = entry["player_first_name"]
+                team_name = entry["entry_name"]
+
+                records = []
+                hist_res = session.get(ENTRY_HISTORY_URL.format(entry_id))
+                if hist_res.status_code == 200:
+                    history = hist_res.json().get("history", [])
+                    for gw in history:
+                        records.append({
+                            "entry_id": entry_id,
+                            "Teams": manager_name,
+                            "Team Name": team_name,
+                            "GW": gw["event"],
+                            "Points": gw["points"]
+                        })
+                return records
+
+            all_records = []
+            # Reused session gives connection-pooling/keep-alive benefits across threads
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, max(1, len(entries)))) as executor:
+                for result in executor.map(fetch_entry, entries):
+                    all_records.extend(result)
+
+        if not all_records:
+            return None, "No history records retrieved."
+
+        df = pd.DataFrame(all_records)
+        return df, None
     except Exception as e:
-        return None, f"Could not load FPL data: {e}"
+        return None, str(e)
 
 
 # ==========================================
@@ -280,33 +249,30 @@ def build_dashboard_tables(raw_df: pd.DataFrame, max_played_gw: int):
             season_cash_won[final_ranks[1]] += SEASON_2ND_PRIZE
 
     # 5. SUMMARY & CASH MATRIX
-    # Walk the (small) winners table once instead of assigning cell-by-cell for
-    # every manager x gameweek x podium position, which is much slower in pandas.
-    counts = {m: {1: 0, 2: 0, 3: 0, 4: 0} for m in all_managers}
-    cash_matrix = pd.DataFrame(pd.NA, index=all_managers, columns=all_gw_cols, dtype="Int64")
-    if played_gw_cols:
-        cash_matrix[played_gw_cols] = 0  # Played Gameweeks default to 0
-
-    for pos in (1, 2, 3, 4):
-        for col_name in played_gw_cols:
-            winner = winners_dict[pos].get(col_name)
-            if winner and winner in counts:
-                counts[winner][pos] += 1
-                cash_matrix.at[winner, col_name] = WEEKLY_PRIZE_MAP[pos]
-
     summary_data = []
+    cash_matrix = pd.DataFrame(pd.NA, index=all_managers, columns=all_gw_cols, dtype="Int64")
+
     for manager in all_managers:
-        weekly_amount = sum(counts[manager][p] * WEEKLY_PRIZE_MAP[p] for p in WEEKLY_PRIZE_MAP)
+        counts = {1: 0, 2: 0, 3: 0, 4: 0}
+        for gw in range(1, max_played_gw + 1):
+            col_name = f"GW{gw}"
+            cash_matrix.loc[manager, col_name] = 0  # Default played Gameweek to 0
+            for pos in [1, 2, 3, 4]:
+                if winners_dict[pos].get(col_name) == manager:
+                    counts[pos] += 1
+                    cash_matrix.loc[manager, col_name] = WEEKLY_PRIZE_MAP[pos]
+
+        weekly_amount = sum(counts[p] * WEEKLY_PRIZE_MAP[p] for p in WEEKLY_PRIZE_MAP)
         motm_amount = motm_cash_won[manager]
         season_amount = season_cash_won[manager]
         total_cash = weekly_amount + motm_amount + season_amount
 
         summary_data.append({
             "Teams": manager,
-            "1st": counts[manager][1],
-            "2nd": counts[manager][2],
-            "3rd": counts[manager][3],
-            "4th": counts[manager][4],
+            "1st": counts[1],
+            "2nd": counts[2],
+            "3rd": counts[3],
+            "4th": counts[4],
             "MOTM Wins": motm_wins_count[manager],
             "Weekly Cash (₹)": int(weekly_amount),
             "MOTM Cash (₹)": int(motm_amount),
@@ -358,19 +324,20 @@ def highlight_podium(df, winners):
 
 
 # ==========================================
-# MONTE CARLO PROJECTION FUNCTIONS (FULLY VECTORIZED)
+# MONTE CARLO PROJECTION FUNCTIONS (VECTORIZED)
 # ==========================================
 def _manager_stats(raw_df, managers):
-    """Returns per-manager (mean, std) point stats as numpy arrays.
-    Uses a single groupby instead of a per-manager loop."""
-    grp = raw_df.groupby("Teams")["Points"]
-    mean = grp.mean().reindex(managers).to_numpy(dtype=float)
-    std = grp.std(ddof=0).reindex(managers).to_numpy(dtype=float)
-    cnt = grp.count().reindex(managers).fillna(0).to_numpy()
-
-    # >=2 games: observed mean/std (std floored at 6); 1 game: that score, std 12; none: 45, std 12
-    means = np.where(cnt >= 1, mean, 45.0)
-    stds = np.where(cnt >= 2, np.maximum(std, 6.0), 12.0)
+    """Returns per-manager (mean, std) point stats as numpy arrays."""
+    means = np.empty(len(managers))
+    stds = np.empty(len(managers))
+    for i, mgr in enumerate(managers):
+        pts = raw_df.loc[raw_df["Teams"] == mgr, "Points"].values
+        if len(pts) >= 2:
+            means[i], stds[i] = pts.mean(), max(pts.std(), 6.0)
+        elif len(pts) == 1:
+            means[i], stds[i] = pts[0], 12.0
+        else:
+            means[i], stds[i] = 45.0, 12.0
     return means, stds
 
 
@@ -381,9 +348,9 @@ def run_monte_carlo_season_projections(raw_df, managers, max_played_gw, num_simu
         return {}
 
     means, stds = _manager_stats(raw_df, managers)
-    current_totals = (
-        raw_df.groupby("Teams")["Points"].sum().reindex(managers).fillna(0).to_numpy(dtype=float)
-    )
+    current_totals = np.array([
+        raw_df.loc[raw_df["Teams"] == mgr, "Points"].values.sum() for mgr in managers
+    ], dtype=float)
 
     remaining_gws = 38 - max_played_gw
     if remaining_gws <= 0:
@@ -396,15 +363,13 @@ def run_monte_carlo_season_projections(raw_df, managers, max_played_gw, num_simu
             result[second_mgr] = (result[second_mgr][0], 100)
         return result
 
-    # The sum of n independent Normal(mu, sigma) draws is exactly Normal(n*mu, sigma*sqrt(n)),
-    # so draw the remaining-season total directly: shape (num_simulations, num_managers).
-    rng = np.random.default_rng()
-    season_sums = rng.normal(
-        loc=means * remaining_gws,
-        scale=stds * np.sqrt(remaining_gws),
-        size=(num_simulations, len(managers)),
+    # Simulate all managers & all simulations at once: (num_simulations, num_managers, remaining_gws)
+    sims = np.random.normal(
+        loc=means[None, :, None],
+        scale=stds[None, :, None],
+        size=(num_simulations, len(managers), remaining_gws)
     )
-    sim_totals = current_totals[None, :] + np.maximum(season_sums, 0)
+    sim_totals = current_totals[None, :] + np.maximum(sims.sum(axis=2), 0)
 
     order = np.argsort(-sim_totals, axis=1)
     first_counts = np.bincount(order[:, 0], minlength=len(managers))
@@ -433,11 +398,10 @@ def run_monte_carlo_motm_projections(raw_df, managers, month_gws, max_played_gw,
     remaining_in_month = [gw for gw in month_gws if gw > max_played_gw]
 
     means, stds = _manager_stats(raw_df, managers)
-    current_month_pts = (
-        raw_df[raw_df["GW"].isin(completed_in_month)]
-        .groupby("Teams")["Points"].sum()
-        .reindex(managers).fillna(0).to_numpy(dtype=float)
-    )
+    current_month_pts = np.array([
+        raw_df.loc[(raw_df["Teams"] == mgr) & (raw_df["GW"].isin(completed_in_month)), "Points"].values.sum()
+        for mgr in managers
+    ], dtype=float)
 
     if not remaining_in_month:
         top_score = current_month_pts.max()
@@ -446,13 +410,12 @@ def run_monte_carlo_motm_projections(raw_df, managers, month_gws, max_played_gw,
         return {managers[i]: (int(round(win_share)) if winners[i] else 0) for i in range(len(managers))}
 
     rem_count = len(remaining_in_month)
-    rng = np.random.default_rng()
-    month_sums = rng.normal(
-        loc=means * rem_count,
-        scale=stds * np.sqrt(rem_count),
-        size=(num_simulations, len(managers)),
+    sims = np.random.normal(
+        loc=means[None, :, None],
+        scale=stds[None, :, None],
+        size=(num_simulations, len(managers), rem_count)
     )
-    sim_totals = current_month_pts[None, :] + np.maximum(month_sums, 0)
+    sim_totals = current_month_pts[None, :] + np.maximum(sims.sum(axis=2), 0)
 
     top_scores = sim_totals.max(axis=1, keepdims=True)
     win_mask = sim_totals == top_scores
@@ -484,7 +447,6 @@ if league_id:
 
     if error:
         st.error(error)
-        st.caption("Failed fetches are not cached, so refreshing the page or pressing 'Force Sync' will retry.")
     elif raw_df is not None and not raw_df.empty:
 
         # Only consider GWs where at least someone actually scored
@@ -502,15 +464,6 @@ if league_id:
         motm_months_list = list(GW_MONTH_MAPPING.keys())
         default_motm_month = current_motm_month if current_motm_month in motm_months_list else motm_months_list[0]
         default_motm_index = motm_months_list.index(default_motm_month)
-
-        # The month selector lives in the sidebar so it is rendered on every run and
-        # its value is available to both the MOTM standings and the probabilities view.
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("**Manager of the Month**")
-        selected_month = st.sidebar.selectbox(
-            "Select Calendar Month", motm_months_list, index=default_motm_index, key="motm_month_selectbox"
-        )
-        target_gws = GW_MONTH_MAPPING[selected_month]
 
         # ==========================================
         # LIVE TICKER — current GW top 4 + current month leader
@@ -567,7 +520,7 @@ if league_id:
 
         if ticker_slides:
             slides_json = json.dumps(ticker_slides)
-            st.components.v1.html(
+            components.html(
                 f"""
                 <div style="overflow: hidden; white-space: nowrap; background: linear-gradient(90deg,#37003c,#00ff85);
                             border-radius: 8px; padding: 12px 0; box-sizing: border-box; margin: 0;
@@ -605,25 +558,13 @@ if league_id:
             )
 
         # ==========================================
-        # DASHBOARD VIEWS
-        # st.tabs runs ALL tabs on every rerun (including the Monte Carlo
-        # simulations and the external live-tracker iframe). A radio selector only
-        # renders the chosen view, so each run does far less work.
+        # DASHBOARD TABS
         # ==========================================
-        VIEW_OVERVIEW = "📊 Points & Standings"
-        VIEW_CASH = "💰 Podium Counts & Cash Won"
-        VIEW_PROB = "🎲 Win Probabilities (%)"
-        VIEW_LIVE = "🔴 Live GW Points"
+        tab_overview, tab_cash, tab_prob, tab_live = st.tabs([
+            "📊 Points & Standings", "💰 Podium Counts & Cash Won", "🎲 Win Probabilities (%)", "🔴 Live GW Points"
+        ])
 
-        view = st.radio(
-            "View",
-            [VIEW_OVERVIEW, VIEW_CASH, VIEW_PROB, VIEW_LIVE],
-            horizontal=True,
-            label_visibility="collapsed",
-            key="dashboard_view",
-        )
-
-        if view == VIEW_OVERVIEW:
+        with tab_overview:
             st.subheader("📋 Points Matrix (GW1 - GW38)")
             st.caption(
                 f"Sorted by GW{max_played_gw} points (latest Gameweek), highest to lowest; ties are broken by "
@@ -667,10 +608,12 @@ if league_id:
 
             st.markdown("---")
             st.subheader("👑 Manager of the Month Standings")
+            selected_month = st.selectbox(
+                "Select Calendar Month", motm_months_list, index=default_motm_index, key="motm_month_selectbox"
+            )
             if selected_month == current_motm_month:
-                st.caption(f"{selected_month} is the current month (IST). Change the month from the sidebar.")
-            else:
-                st.caption(f"Showing {selected_month}. Change the month from the sidebar.")
+                st.caption(f"{selected_month} is the current month (IST).")
+            target_gws = GW_MONTH_MAPPING[selected_month]
 
             is_month_complete = all(gw <= max_played_gw for gw in target_gws)
             if is_month_complete:
@@ -715,23 +658,7 @@ if league_id:
             else:
                 st.info(f"No Gameweek points finalized yet for {selected_month} (GWs: {target_gws}).")
 
-            # --- ADDED MOTM WINNERS HISTORY ---
-            st.markdown("---")
-            st.subheader("🏅 Manager of the Month Winners")
-            motm_history = []
-            for m in all_month_names:
-                # If the month exists in the matrix and has at least one awarded value > 0
-                if m in monthly_cash_matrix.columns and monthly_cash_matrix[m].notna().any():
-                    winner = monthly_cash_matrix[monthly_cash_matrix[m] > 0].index.tolist()
-                    if winner:
-                        motm_history.append({"Month": m, "Manager": winner[0]})
-
-            if motm_history:
-                st.dataframe(pd.DataFrame(motm_history), use_container_width=True, hide_index=True)
-            else:
-                st.info("No months have been fully completed yet.")
-
-        elif view == VIEW_CASH:
+        with tab_cash:
             col_left, col_right = st.columns([2, 1])
             with col_left:
                 st.subheader("🎖️ Podium Counts & Total Cash Won")
@@ -755,7 +682,7 @@ if league_id:
             st.caption("Blank = month not yet complete, so MOTM cash hasn't been awarded. Ties are broken by higher season-to-date cumulative points.")
             st.dataframe(_blank_nulls(monthly_cash_matrix), use_container_width=True)
 
-        elif view == VIEW_PROB:
+        with tab_prob:
             st.header("🎲 Monte Carlo Win Probability Projections")
             st.caption("Projections based on 5,000 simulations using each manager's historical scoring rate and variance.")
             if all_managers:
@@ -771,10 +698,23 @@ if league_id:
                     motm_prob_df = pd.DataFrame([{"Teams": m, "Win MOTM Prob (%)": f"{motm_probs.get(m, 0)}%"} for m in all_managers]).sort_values(by="Win MOTM Prob (%)", ascending=False).reset_index(drop=True)
                     st.dataframe(motm_prob_df, use_container_width=True, hide_index=True)
 
-        elif view == VIEW_LIVE:
+        with tab_live:
             st.subheader("🔴 Live Gameweek Points Tracker")
-            st.markdown(f"Monitor live points. *(If the embed fails, [click here to open the tracker]({LIVE_TRACKER_URL}))*")
-            # Only created when this view is selected, so the external page isn't loaded on every run.
-            st.components.v1.iframe(LIVE_TRACKER_URL, height=800)
+            st.markdown("Monitor live points. *(If the embed fails, [click here to open the tracker](https://www.anewpla.net/fpl/live/))*")
+
+            components.html(
+                """
+                <iframe
+                    src="https://www.anewpla.net/fpl/live/"
+                    width="100%"
+                    height="800px"
+                    style="border:none;"
+                    loading="lazy"
+                    title="Live FPL Gameweek Points Tracker">
+                </iframe>
+                """,
+                height=800,
+                scrolling=True
+            )
 else:
     st.info("👈 Please enter your Draft League ID in the sidebar to load the dashboard.")
