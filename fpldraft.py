@@ -567,7 +567,7 @@ if league_id:
 
         if ticker_slides:
             slides_json = json.dumps(ticker_slides)
-            st.iframe(
+            st.components.v1.html(
                 f"""
                 <div style="overflow: hidden; white-space: nowrap; background: linear-gradient(90deg,#37003c,#00ff85);
                             border-radius: 8px; padding: 12px 0; box-sizing: border-box; margin: 0;
@@ -659,11 +659,11 @@ if league_id:
                 axis=None
             )
 
-            st.dataframe(styled_points, width="stretch")
+            st.dataframe(styled_points, use_container_width=True)
 
             st.subheader("🏆 Weekly Podium Winners (1st - 4th)")
             st.caption("Ties on GW points are broken by season-to-date cumulative total points.")
-            st.dataframe(winners_df, width="stretch")
+            st.dataframe(winners_df, use_container_width=True)
 
             st.markdown("---")
             st.subheader("👑 Manager of the Month Standings")
@@ -711,33 +711,49 @@ if league_id:
                 else:
                     st.info(f"Leader so far: {winner_name} ({int(top_score)} pts){tie_note}. Cash will be awarded after all GWs finish.")
 
-                st.dataframe(_blank_nulls(motm_pivot), width="stretch")
+                st.dataframe(_blank_nulls(motm_pivot), use_container_width=True)
             else:
                 st.info(f"No Gameweek points finalized yet for {selected_month} (GWs: {target_gws}).")
+
+            # --- ADDED MOTM WINNERS HISTORY ---
+            st.markdown("---")
+            st.subheader("🏅 Manager of the Month Winners")
+            motm_history = []
+            for m in all_month_names:
+                # If the month exists in the matrix and has at least one awarded value > 0
+                if m in monthly_cash_matrix.columns and monthly_cash_matrix[m].notna().any():
+                    winner = monthly_cash_matrix[monthly_cash_matrix[m] > 0].index.tolist()
+                    if winner:
+                        motm_history.append({"Month": m, "Manager": winner[0]})
+
+            if motm_history:
+                st.dataframe(pd.DataFrame(motm_history), use_container_width=True, hide_index=True)
+            else:
+                st.info("No months have been fully completed yet.")
 
         elif view == VIEW_CASH:
             col_left, col_right = st.columns([2, 1])
             with col_left:
                 st.subheader("🎖️ Podium Counts & Total Cash Won")
                 if not summary_df.empty:
-                    st.dataframe(summary_df.sort_values(by="Total Cash (₹)", ascending=False), width="stretch")
+                    st.dataframe(summary_df.sort_values(by="Total Cash (₹)", ascending=False), use_container_width=True)
             with col_right:
                 st.subheader("💵 Prize Rules")
                 prize_rule_df = pd.DataFrame({
                     "Award Category": ["Weekly 1st", "Weekly 2nd", "Weekly 3rd", "Weekly 4th", "MOTM (Complete)", "1st Overall", "2nd Overall"],
                     "Cash": [f"₹{WEEKLY_PRIZE_MAP[1]}", f"₹{WEEKLY_PRIZE_MAP[2]}", f"₹{WEEKLY_PRIZE_MAP[3]}", f"₹{WEEKLY_PRIZE_MAP[4]}", f"₹{MOTM_PRIZE}", f"₹{SEASON_1ST_PRIZE}", f"₹{SEASON_2ND_PRIZE}"]
                 })
-                st.dataframe(prize_rule_df, width="stretch", hide_index=True)
+                st.dataframe(prize_rule_df, use_container_width=True, hide_index=True)
                 st.caption("Ties (GW or MOTM) are broken by higher season-to-date cumulative points.")
 
             st.markdown("---")
             st.subheader("💳 Weekly Cash Won per Gameweek (₹)")
-            st.dataframe(_blank_nulls(cash_matrix), width="stretch")
+            st.dataframe(_blank_nulls(cash_matrix), use_container_width=True)
 
             st.markdown("---")
             st.subheader("📅 Monthly Cash Won per Month (₹)")
             st.caption("Blank = month not yet complete, so MOTM cash hasn't been awarded. Ties are broken by higher season-to-date cumulative points.")
-            st.dataframe(_blank_nulls(monthly_cash_matrix), width="stretch")
+            st.dataframe(_blank_nulls(monthly_cash_matrix), use_container_width=True)
 
         elif view == VIEW_PROB:
             st.header("🎲 Monte Carlo Win Probability Projections")
@@ -748,17 +764,17 @@ if league_id:
                     st.subheader("🏆 End-of-Season Probability (GW38)")
                     season_probs = run_monte_carlo_season_projections(raw_df, tuple(all_managers), max_played_gw)
                     season_prob_df = pd.DataFrame([{"Teams": m, "Current Pts": int(points_pivot.loc[m, "Total"]) if "Total" in points_pivot.columns else 0, "1st Place (%)": f"{season_probs.get(m, (0, 0))[0]}%", "2nd Place (%)": f"{season_probs.get(m, (0, 0))[1]}%"} for m in all_managers]).sort_values(by="Current Pts", ascending=False).reset_index(drop=True)
-                    st.dataframe(season_prob_df, width="stretch", hide_index=True)
+                    st.dataframe(season_prob_df, use_container_width=True, hide_index=True)
                 with col_month:
                     st.subheader(f"👑 MOTM Probability: {selected_month}")
                     motm_probs = run_monte_carlo_motm_projections(raw_df, tuple(all_managers), tuple(target_gws), max_played_gw)
                     motm_prob_df = pd.DataFrame([{"Teams": m, "Win MOTM Prob (%)": f"{motm_probs.get(m, 0)}%"} for m in all_managers]).sort_values(by="Win MOTM Prob (%)", ascending=False).reset_index(drop=True)
-                    st.dataframe(motm_prob_df, width="stretch", hide_index=True)
+                    st.dataframe(motm_prob_df, use_container_width=True, hide_index=True)
 
         elif view == VIEW_LIVE:
             st.subheader("🔴 Live Gameweek Points Tracker")
             st.markdown(f"Monitor live points. *(If the embed fails, [click here to open the tracker]({LIVE_TRACKER_URL}))*")
             # Only created when this view is selected, so the external page isn't loaded on every run.
-            st.iframe(LIVE_TRACKER_URL, height=800)
+            st.components.v1.iframe(LIVE_TRACKER_URL, height=800)
 else:
     st.info("👈 Please enter your Draft League ID in the sidebar to load the dashboard.")
